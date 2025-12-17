@@ -28,38 +28,8 @@ static const int TFT_BL = 4;
 // Create ST7789 instance using hardware SPI
 Adafruit_ST7789 tft = Adafruit_ST7789(&SPI, TFT_CS, TFT_DC, TFT_RST);
 
-// --- From main2: WiFi, servo and watchdog configuration ---
-// WiFi credentials
-const char *ssid1 = "Livebox6-1CB6-24G";
-const char *pass1 = "dxGVxr6Kb6LV";
-const char *ssid2 = "TP-Link_25FE";
-const char *pass2 = "37522872";
-
-// Set your trigger epoch here (seconds since 1970)
-// NOTE: became a variable so button handler can update it at runtime.
-time_t trigger_date = 1774835200UL;
-
 // Watchdog timeout (seconds)
 #define WDT_TIMEOUT 10
-
-// Servo configuration
-const int SERVO_PIN = 13;
-Servo myservo;
-bool servoTriggered = false;
-// Track current servo position (degrees). Initialized to 10 in setup.
-int currentServoDeg = 10;
-
-// MQTT globals
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
-const char *mqtt_server = "192.168.1.52";
-const char *mqttTopic = "/esp32tto/status";
-unsigned long lastHourlyPublish = 0;
-unsigned long lastPublishValue = 0;
-unsigned long lastMqttReconnectAttempt = 0;
-const unsigned long MQTT_RECONNECT_INTERVAL = 10000UL; // try reconnect every 10s
-bool servoPublished = false;                           // ensure single publish when servoTriggered becomes true
-bool bootStatusPublished = false;                      // publish '0' once after first successful MQTT connection
 
 // Screen and shutdown management
 unsigned long bootMillis = 0;
@@ -86,6 +56,7 @@ typedef struct
   double alt;
   double speed_kmh;
   bool valid;
+  char raw[128];
 } GPSMsg;
 
 static QueueHandle_t gpsQueue = NULL;   // queue for parsed GPS messages (to display)
@@ -166,26 +137,52 @@ static void uart_event_task(void *pvParameters)
       if (event.type == UART_DATA)
       {
         int len = uart_read_bytes(GPS_UART, dtmp, event.size, portMAX_DELAY);
+        // Debug: print RX activity to Serial console
+        Serial.printf("[GPS UART] DATA received: %d bytes\n", len);
+        Serial.print("[GPS UART] HEX: ");
+        for (int i = 0; i < len; ++i)
+        {
+          Serial.printf("%02X ", dtmp[i]);
+        }
+        Serial.println();
+        Serial.print("[GPS UART] STR: ");
+        Serial.write(dtmp, len);
+        Serial.println();
         for (int i = 0; i < len; ++i)
         {
           gps.encode(dtmp[i]);
         }
 
-        // If we have new information, send it to the display task
-        if (gps.location.isUpdated() || gps.speed.isUpdated() || gps.altitude.isUpdated())
+        // Prepare debug/raw string (truncate if too long)
+        GPSMsg msg;
+        size_t copy_len = (size_t)len;
+        if (copy_len >= sizeof(msg.raw))
+          copy_len = sizeof(msg.raw) - 1;
+        if (copy_len > 0)
         {
-          GPSMsg msg;
-          msg.valid = gps.location.isValid();
-          msg.lat = msg.valid ? gps.location.lat() : 0.0;
-          msg.lng = msg.valid ? gps.location.lng() : 0.0;
-          msg.alt = gps.altitude.isValid() ? gps.altitude.meters() : 0.0;
-          msg.speed_kmh = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
-          xQueueSend(gpsQueue, &msg, 0);
+          memcpy(msg.raw, dtmp, copy_len);
+        }
+        msg.raw[copy_len] = '\0';
+
+        // If we have new information, fill numeric fields and send it to the display task
+        msg.valid = gps.location.isValid();
+        msg.lat = msg.valid ? gps.location.lat() : 0.0;
+        msg.lng = msg.valid ? gps.location.lng() : 0.0;
+        msg.alt = gps.altitude.isValid() ? gps.altitude.meters() : 0.0;
+        msg.speed_kmh = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
+        if (xQueueSend(gpsQueue, &msg, 0) != pdTRUE)
+        {
+          Serial.println("[GPS UART] Warning: gpsQueue send failed");
+        }
+        else
+        {
+          Serial.println("[GPS UART] Message queued for display");
         }
       }
       else if (event.type == UART_FIFO_OVF || event.type == UART_BUFFER_FULL)
       {
         // Overflow, flush input
+        Serial.println("[GPS UART] FIFO overflow / buffer full - flushing");
         uart_flush_input(GPS_UART);
         xQueueReset(uart_queue);
       }
@@ -206,6 +203,8 @@ static void gps_display_task(void *pvParameters)
       if (!msg.valid)
       {
         showMessage("GPS: no fix", 20, ST77XX_RED, 1);
+        // still show raw debug even if no fix
+        showMessage(msg.raw, h - 18, ST77XX_YELLOW, 1);
         continue;
       }
 
@@ -222,6 +221,11 @@ static void gps_display_task(void *pvParameters)
       // Speed in km/h
       snprintf(linebuf, sizeof(linebuf), "Speed: %.1f km/h", msg.speed_kmh);
       showMessage(linebuf, 76, ST77XX_WHITE, 1);
+      // Debug raw transfer (bottom of screen)
+      if (msg.raw[0] != '\0')
+      {
+        showMessage(msg.raw, h - 18, ST77XX_YELLOW, 1);
+      }
     }
   }
 }
@@ -283,7 +287,7 @@ void setup()
   {
     esp_task_wdt_add(NULL); // add current thread to WDT
     showMessage("Watchdog enabled", 100, ST77XX_WHITE, 2);
-    delay(200);
+    delay(1000);
   }
   else
   {
@@ -310,6 +314,7 @@ void setup()
     // install driver with event queue (no busy-polling)
     const int uart_buffer_size = 2048;
     uart_driver_install(GPS_UART, uart_buffer_size, 0, 20, &uart_queue, 0);
+    Serial.printf("GPS UART initialized: UART=%d RX=%d TX=%d Baud=%d\n", (int)GPS_UART, GPS_RX_PIN, GPS_TX_PIN, GPS_BAUD);
 
     // create queue for parsed GPS messages
     gpsQueue = xQueueCreate(4, sizeof(GPSMsg));
