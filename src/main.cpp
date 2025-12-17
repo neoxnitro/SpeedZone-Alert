@@ -10,6 +10,12 @@
 #include <esp_sleep.h>
 // MQTT
 #include <PubSubClient.h>
+// GPS parsing + low-level UART driver
+#include <TinyGPSPlus.h>
+#include "driver/uart.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 
 // Pins from the TTGO config / discovered earlier
 static const int TFT_MOSI = 19;
@@ -64,6 +70,30 @@ const unsigned long SCREEN_OFF_AFTER_BOOT_MS = 60000UL;        // 1 minute
 const unsigned long SHUTDOWN_DELAY_AFTER_TRIGGER_MS = 60000UL; // 1 minute after remaining==0
 
 int w, h;
+
+// --- GPS / UART1 handling (interrupt-driven, TinyGPSPlus) ---
+static const uart_port_t GPS_UART = UART_NUM_1; // use UART1
+static const int GPS_RX_PIN = 21;               // user requested mapping
+static const int GPS_TX_PIN = 22;
+static const int GPS_BAUD = 9600;
+
+TinyGPSPlus gps;
+
+typedef struct
+{
+  double lat;
+  double lng;
+  double alt;
+  double speed_kmh;
+  bool valid;
+} GPSMsg;
+
+static QueueHandle_t gpsQueue = NULL;   // queue for parsed GPS messages (to display)
+static QueueHandle_t uart_queue = NULL; // uart event queue
+
+// Forward declarations
+static void uart_event_task(void *pvParameters);
+static void gps_display_task(void *pvParameters);
 
 // Button pins (change these to match your board wiring)
 // For TTGO boards you may need to adjust these pins to the actual buttons used.
@@ -121,6 +151,79 @@ void IRAM_ATTR button1ISR()
 void IRAM_ATTR button2ISR()
 {
   button2Pressed = true;
+}
+
+// UART event task: runs when UART driver posts an event (interrupt-driven)
+static void uart_event_task(void *pvParameters)
+{
+  uart_event_t event;
+  uint8_t dtmp[256];
+  for (;;)
+  {
+    // Block until an event is available
+    if (xQueueReceive(uart_queue, (void *)&event, portMAX_DELAY))
+    {
+      if (event.type == UART_DATA)
+      {
+        int len = uart_read_bytes(GPS_UART, dtmp, event.size, portMAX_DELAY);
+        for (int i = 0; i < len; ++i)
+        {
+          gps.encode(dtmp[i]);
+        }
+
+        // If we have new information, send it to the display task
+        if (gps.location.isUpdated() || gps.speed.isUpdated() || gps.altitude.isUpdated())
+        {
+          GPSMsg msg;
+          msg.valid = gps.location.isValid();
+          msg.lat = msg.valid ? gps.location.lat() : 0.0;
+          msg.lng = msg.valid ? gps.location.lng() : 0.0;
+          msg.alt = gps.altitude.isValid() ? gps.altitude.meters() : 0.0;
+          msg.speed_kmh = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
+          xQueueSend(gpsQueue, &msg, 0);
+        }
+      }
+      else if (event.type == UART_FIFO_OVF || event.type == UART_BUFFER_FULL)
+      {
+        // Overflow, flush input
+        uart_flush_input(GPS_UART);
+        xQueueReset(uart_queue);
+      }
+      // other event types are ignored for brevity
+    }
+  }
+}
+
+// Display task: blocks on gpsQueue and updates the display when a new GPSMsg arrives
+static void gps_display_task(void *pvParameters)
+{
+  GPSMsg msg;
+  char linebuf[128];
+  for (;;)
+  {
+    if (xQueueReceive(gpsQueue, &msg, portMAX_DELAY) == pdTRUE)
+    {
+      if (!msg.valid)
+      {
+        showMessage("GPS: no fix", 20, ST77XX_RED, 1);
+        continue;
+      }
+
+      // Position
+      snprintf(linebuf, sizeof(linebuf), "Lat: %.6f", msg.lat);
+      showMessage(linebuf, 20, ST77XX_WHITE, 1);
+      snprintf(linebuf, sizeof(linebuf), "Lon: %.6f", msg.lng);
+      showMessage(linebuf, 36, ST77XX_WHITE, 1);
+
+      // Altitude in meters
+      snprintf(linebuf, sizeof(linebuf), "Alt: %.1f m", msg.alt);
+      showMessage(linebuf, 56, ST77XX_WHITE, 1);
+
+      // Speed in km/h
+      snprintf(linebuf, sizeof(linebuf), "Speed: %.1f km/h", msg.speed_kmh);
+      showMessage(linebuf, 76, ST77XX_WHITE, 1);
+    }
+  }
 }
 
 void setup()
@@ -193,6 +296,29 @@ void setup()
   pinMode(BUTTON2_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BUTTON1_PIN), button1ISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(BUTTON2_PIN), button2ISR, FALLING);
+  // --- Initialize UART1 for GPS (interrupt-driven) ---
+  {
+    uart_config_t uart_config = {
+        .baud_rate = GPS_BAUD,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    };
+    uart_param_config(GPS_UART, &uart_config);
+    uart_set_pin(GPS_UART, GPS_TX_PIN, GPS_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    // install driver with event queue (no busy-polling)
+    const int uart_buffer_size = 2048;
+    uart_driver_install(GPS_UART, uart_buffer_size, 0, 20, &uart_queue, 0);
+
+    // create queue for parsed GPS messages
+    gpsQueue = xQueueCreate(4, sizeof(GPSMsg));
+
+    // create a task to handle UART events (runs when data arrives)
+    xTaskCreate(uart_event_task, "uart_event_task", 4096, NULL, 12, NULL);
+    // create a task to display GPS data (blocks on gpsQueue)
+    xTaskCreate(gps_display_task, "gps_display_task", 4096, NULL, 1, NULL);
+  }
   // --- End migrated logic from main2 setup ---
   // Clear only the interior so the border drawn earlier remains visible
   tft.fillScreen(ST77XX_BLACK);
