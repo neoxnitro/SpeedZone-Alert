@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "driver/gpio.h"
 
 // Pins from the TTGO config / discovered earlier
 static const int TFT_MOSI = 19;
@@ -24,6 +25,13 @@ static const int TFT_CS = 5;
 static const int TFT_DC = 16;
 static const int TFT_RST = 23;
 static const int TFT_BL = 4;
+
+// Buzzer wiring: connect a (passive) buzzer or speaker between these two GPIO pins
+// (no GND needed). The code toggles the pins in opposite phase to increase
+// the effective voltage swing across the buzzer for stronger sound.
+// Change these pin numbers to match your wiring.
+static const int BUZZER_PIN_A = 25;
+static const int BUZZER_PIN_B = 26;
 
 // Create ST7789 instance using hardware SPI
 Adafruit_ST7789 tft = Adafruit_ST7789(&SPI, TFT_CS, TFT_DC, TFT_RST);
@@ -68,6 +76,10 @@ static void uart_event_task(void *pvParameters);
 static void gps_display_task(void *pvParameters);
 static void sendUbxCfgRate5Hz();
 static void sendUbxCfgPrt115200();
+// Buzzer control
+static void startTone(uint32_t freqHz);
+static void stopTone();
+static void beep(uint32_t freqHz, uint32_t durationMs);
 
 // Button pins (change these to match your board wiring)
 // For TTGO boards you may need to adjust these pins to the actual buttons used.
@@ -125,6 +137,18 @@ void IRAM_ATTR button1ISR()
 void IRAM_ATTR button2ISR()
 {
   button2Pressed = true;
+}
+
+// --- Buzzer timer and state ---
+static hw_timer_t *buzzerTimer = NULL;
+static volatile bool buzzerState = false;
+
+// Timer ISR toggles the two buzzer pins in opposite phase to increase swing.
+void IRAM_ATTR onBuzzerTimer()
+{
+  buzzerState = !buzzerState;
+  gpio_set_level((gpio_num_t)BUZZER_PIN_A, buzzerState ? 1 : 0);
+  gpio_set_level((gpio_num_t)BUZZER_PIN_B, buzzerState ? 0 : 1);
 }
 
 // UART event task: runs when UART driver posts an event (interrupt-driven)
@@ -313,6 +337,13 @@ void setup()
   pinMode(BUTTON2_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BUTTON1_PIN), button1ISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(BUTTON2_PIN), button2ISR, FALLING);
+  // Configure buzzer pins (outputs). Connect passive buzzer between these two pins.
+  pinMode(BUZZER_PIN_A, OUTPUT);
+  pinMode(BUZZER_PIN_B, OUTPUT);
+  digitalWrite(BUZZER_PIN_A, LOW);
+  digitalWrite(BUZZER_PIN_B, LOW);
+  // Optional quick test beep (uncomment to hear a short tone on boot)
+  beep(2000, 150);
   // --- Initialize UART1 for GPS (interrupt-driven) ---
   {
     uart_config_t uart_config = {
@@ -498,4 +529,42 @@ static void sendUbxCfgPrt115200()
   int tosend = idx;
   int written = uart_write_bytes(GPS_UART, (const char *)msg, tosend);
   Serial.printf("[GPS UBX] Sent CFG-PRT (change baud->115200) %d bytes, written=%d\n", tosend, written);
+}
+
+// --- Buzzer control functions ---
+// Start a square wave on the two pins with given frequency (Hz)
+static void startTone(uint32_t freqHz)
+{
+  if (freqHz == 0)
+    return;
+  uint32_t halfPeriodUs = 500000UL / freqHz; // half period in microseconds
+  if (!buzzerTimer)
+  {
+    // Use timer 0, prescaler 80 -> 1 tick = 1 microsecond
+    buzzerTimer = timerBegin(0, 80, true);
+    timerAttachInterrupt(buzzerTimer, &onBuzzerTimer, true);
+  }
+  timerAlarmWrite(buzzerTimer, halfPeriodUs, true);
+  timerAlarmEnable(buzzerTimer);
+}
+
+static void stopTone()
+{
+  if (buzzerTimer)
+  {
+    timerAlarmDisable(buzzerTimer);
+  }
+  gpio_set_level((gpio_num_t)BUZZER_PIN_A, 0);
+  gpio_set_level((gpio_num_t)BUZZER_PIN_B, 0);
+  buzzerState = false;
+}
+
+// Simple blocking beep helper (starts tone, waits, stops tone)
+static void beep(uint32_t freqHz, uint32_t durationMs)
+{
+  if (freqHz == 0 || durationMs == 0)
+    return;
+  startTone(freqHz);
+  delay(durationMs);
+  stopTone();
 }
