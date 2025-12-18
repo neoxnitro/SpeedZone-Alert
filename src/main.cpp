@@ -1,6 +1,7 @@
 // Clean Adafruit ST7789 test sketch
 #include <Arduino.h>
 #include <SPI.h>
+#include <math.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <WiFi.h>
@@ -67,6 +68,117 @@ typedef struct
   char raw[128];
   int sats;
 } GPSMsg;
+
+// --- Radar detection structures and helpers ---
+typedef struct
+{
+  // polygon points (lat,lng) - support up to 8 points
+  double lat[8];
+  double lng[8];
+  int pointCount;
+  int speedLimitKmh;
+  double centroidLat;
+  double centroidLng;
+} Radar;
+
+// Single radar list (expandable). Initialize with the provided polygon and limit.
+// Polygon: 3 points provided by user (triangle)
+static Radar radars[] = {
+    // radar 0
+    {{28.070642509205204, 28.070150235390756, 28.070642509205204},
+     {-16.70418300253757, -16.701672455006165, -16.701972862407278},
+     3,
+     70,
+     28.07047875193039, // centroid approx (computed as avg of verts)
+     -16.70194250468034}};
+static const int RADAR_COUNT = sizeof(radars) / sizeof(radars[0]);
+
+// Haversine (meters)
+static double haversineMeters(double lat1, double lon1, double lat2, double lon2)
+{
+  const double R = 6371000.0; // earth radius meters
+  double dLat = (lat2 - lat1) * M_PI / 180.0;
+  double dLon = (lon2 - lon1) * M_PI / 180.0;
+  double a = sin(dLat / 2) * sin(dLat / 2) + cos(lat1 * M_PI / 180.0) * cos(lat2 * M_PI / 180.0) * sin(dLon / 2) * sin(dLon / 2);
+  double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  return R * c;
+}
+
+// Ray-casting point-in-polygon test (lat/lon treated as planar since zones are small)
+static bool pointInPolygon(double lat, double lon, const Radar &r)
+{
+  bool inside = false;
+  for (int i = 0, j = r.pointCount - 1; i < r.pointCount; j = i++)
+  {
+    double xi = r.lat[i], yi = r.lng[i];
+    double xj = r.lat[j], yj = r.lng[j];
+    bool intersect = ((yi > lon) != (yj > lon)) && (lat < (xj - xi) * (lon - yi) / (yj - yi + 1e-12) + xi);
+    if (intersect)
+      inside = !inside;
+  }
+  return inside;
+}
+
+// Radar alert state: set by display task, consumed by loop to produce timed beeps
+static volatile bool radarAlertActive = false;
+static unsigned long radarDesiredIntervalMs = 0;
+static unsigned long radarDesiredDurationMs = 0;
+static uint32_t radarDesiredFreqHz = 0;
+
+// Determine radar alerts from current position + speed. Chooses highest-severity alert
+static void updateRadarAlerts(double lat, double lng, double speedKmh)
+{
+  bool anyAlert = false;
+  // severity: 0 = none, 1 = caution (>=65), 2 = over limit (>= limit)
+  int bestSeverity = 0;
+  for (int i = 0; i < RADAR_COUNT; ++i)
+  {
+    Radar &r = radars[i];
+    // quick filter: skip if centroid > 1km away
+    double d = haversineMeters(lat, lng, r.centroidLat, r.centroidLng);
+    if (d > 1000.0)
+      continue;
+
+    // now do accurate polygon test
+    if (!pointInPolygon(lat, lng, r))
+      continue;
+
+    // inside radar zone -> assess speed
+    anyAlert = true;
+    if (speedKmh >= r.speedLimitKmh)
+    {
+      if (bestSeverity < 2)
+        bestSeverity = 2;
+    }
+    else if (speedKmh >= r.speedLimitKmh - 5)
+    {
+      if (bestSeverity < 1)
+        bestSeverity = 1;
+    }
+  }
+
+  if (!anyAlert || bestSeverity == 0)
+  {
+    radarAlertActive = false;
+    return;
+  }
+
+  radarAlertActive = true;
+  if (bestSeverity == 1)
+  {
+    // caution: single short beep every 4s
+    radarDesiredIntervalMs = 4000;
+    radarDesiredDurationMs = 150;
+    radarDesiredFreqHz = 2000;
+  }
+  else // severity 2
+  {
+    // over limit: louder beep every 1s
+    radarDesiredIntervalMs = 1000;
+    radarDesiredDurationMs = 300;
+    radarDesiredFreqHz = 2500;
+  }
+}
 
 static QueueHandle_t gpsQueue = NULL;   // queue for parsed GPS messages (to display)
 static QueueHandle_t uart_queue = NULL; // uart event queue
@@ -142,6 +254,10 @@ void IRAM_ATTR button2ISR()
 // --- Buzzer timer and state ---
 static hw_timer_t *buzzerTimer = NULL;
 static volatile bool buzzerState = false;
+// Non-blocking beep state (managed in loop)
+static unsigned long lastBeepTrigger = 0;
+static unsigned long beepOnUntil = 0;
+static bool beepCurrentlyOn = false;
 
 // Timer ISR toggles the two buzzer pins in opposite phase to increase swing.
 void IRAM_ATTR onBuzzerTimer()
@@ -263,6 +379,9 @@ static void gps_display_task(void *pvParameters)
       char status[64];
       snprintf(status, sizeof(status), "Fix: %s  Sats: %d", msg.valid ? "YES" : "NO", msg.sats);
       showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 1);
+
+      // Update radar alert logic (sets global desired beep interval/duration)
+      updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh);
     }
   }
 }
@@ -445,7 +564,42 @@ void loop()
   }
   esp_task_wdt_reset();
 
-  delay(1000);
+  // Manage radar beeps non-blocking (timed beeps)
+  unsigned long now = millis();
+  if (radarAlertActive)
+  {
+    if (!beepCurrentlyOn)
+    {
+      if (now - lastBeepTrigger >= radarDesiredIntervalMs)
+      {
+        startTone(radarDesiredFreqHz);
+        beepCurrentlyOn = true;
+        beepOnUntil = now + radarDesiredDurationMs;
+        lastBeepTrigger = now;
+      }
+    }
+    else
+    {
+      if (now >= beepOnUntil)
+      {
+        stopTone();
+        beepCurrentlyOn = false;
+      }
+    }
+  }
+  else
+  {
+    if (beepCurrentlyOn)
+    {
+      stopTone();
+      beepCurrentlyOn = false;
+    }
+    // reset trigger so we don't immediately beep when alert appears
+    lastBeepTrigger = now;
+  }
+
+  // Short delay for loop granularity (100ms) - keeps responsiveness for beeps
+  delay(100);
 }
 
 // Send UBX CFG-RATE message to set update rate to 5Hz (measurement rate = 200 ms)
