@@ -136,7 +136,7 @@ static void updateRadarAlerts(double lat, double lng, double speedKmh)
     Radar &r = radars[i];
     // quick filter: skip if centroid > 1km away
     double d = haversineMeters(lat, lng, r.centroidLat, r.centroidLng);
-    if (d > 1000.0)
+    if (d > 500.0)
       continue;
 
     // now do accurate polygon test
@@ -167,7 +167,7 @@ static void updateRadarAlerts(double lat, double lng, double speedKmh)
   if (bestSeverity == 1)
   {
     // caution: single short beep every 4s
-    radarDesiredIntervalMs = 4000;
+    radarDesiredIntervalMs = 2000;
     radarDesiredDurationMs = 150;
     radarDesiredFreqHz = 2000;
   }
@@ -381,7 +381,8 @@ static void gps_display_task(void *pvParameters)
       showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 1);
 
       // Update radar alert logic (sets global desired beep interval/duration)
-      updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh);
+      // updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh);
+      // TODO !!!!!!!!!!! uncomment above and remove test calls in loop()
     }
   }
 }
@@ -539,6 +540,8 @@ void loop()
       button1Pressed = false;
       // xx
       showMessage("Button1: wake 1m", h / 2 - 10, ST77XX_WHITE, 1);
+      beep(1500, 100);
+      updateRadarAlerts(28.070528843942306, -16.703099409962025, 71.0);
     }
     else
     {
@@ -556,6 +559,8 @@ void loop()
       button2Pressed = false;
       // yy
       showMessage("Button2: wake 1m", h / 2 - 10, ST77XX_WHITE, 1);
+      beep(1500, 100);
+      updateRadarAlerts(28.07043420656168, -16.702799022918615, 66.0);
     }
     else
     {
