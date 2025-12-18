@@ -85,12 +85,20 @@ typedef struct
 // Polygon: 3 points provided by user (triangle)
 static Radar radars[] = {
     // radar 0
-    {{28.070642509205204, 28.070150235390756, 28.070642509205204},
-     {-16.70418300253757, -16.701672455006165, -16.701972862407278},
+    {{28.070786571753445, 28.069711613435498, 28.07059817777401},
+     {-16.70479742484261, -16.70110496452421, -16.70110496452421},
      3,
      70,
-     28.07047875193039, // centroid approx (computed as avg of verts)
-     -16.70194250468034}};
+     28.070806175652283,
+     -16.704801935638155},
+    // radar 0
+    {{28.070796708895237, 28.070143499853952, 28.071743351749255},
+     {-16.704812664450014, -16.707344669750903, -16.70736617792127},
+     3,
+     70,
+     28.070806175652283,
+     -16.704801935638155},
+};
 static const int RADAR_COUNT = sizeof(radars) / sizeof(radars[0]);
 
 // Haversine (meters)
@@ -124,27 +132,36 @@ static volatile bool radarAlertActive = false;
 static unsigned long radarDesiredIntervalMs = 0;
 static unsigned long radarDesiredDurationMs = 0;
 static uint32_t radarDesiredFreqHz = 0;
+static volatile bool radarEnteredZone = false;
+// Track transitions into/out of any radar zone (independent of speed/severity)
+static volatile bool radarPrevInZone = false;  // previous measured "in zone" state
+static volatile bool radarJustEntered = false; // set true for one update when entering
+static volatile bool radarJustExited = false;  // set true for one update when exiting
 
 // Determine radar alerts from current position + speed. Chooses highest-severity alert
 static void updateRadarAlerts(double lat, double lng, double speedKmh)
 {
-  bool anyAlert = false;
-  // severity: 0 = none, 1 = caution (>=65), 2 = over limit (>= limit)
+  // Determine whether we're inside ANY radar polygon (independent of speed)
+  bool inAnyZone = false;
+  // severity: 0 = none, 1 = caution, 2 = over limit
   int bestSeverity = 0;
+
   for (int i = 0; i < RADAR_COUNT; ++i)
   {
     Radar &r = radars[i];
-    // quick filter: skip if centroid > 1km away
+    // quick filter: skip if centroid > 500m away
     double d = haversineMeters(lat, lng, r.centroidLat, r.centroidLng);
     if (d > 500.0)
       continue;
 
-    // now do accurate polygon test
+    // polygon test
     if (!pointInPolygon(lat, lng, r))
       continue;
 
-    // inside radar zone -> assess speed
-    anyAlert = true;
+    // we are inside at least one radar polygon
+    inAnyZone = true;
+
+    // evaluate speed-based severity for timed alerts
     if (speedKmh >= r.speedLimitKmh)
     {
       if (bestSeverity < 2)
@@ -157,16 +174,39 @@ static void updateRadarAlerts(double lat, double lng, double speedKmh)
     }
   }
 
-  if (!anyAlert || bestSeverity == 0)
+  // Detect transitions (enter / exit) regardless of severity.
+  if (inAnyZone && !radarPrevInZone)
+  {
+    radarJustEntered = true;
+    radarJustExited = false;
+  }
+  else if (!inAnyZone && radarPrevInZone)
+  {
+    radarJustExited = true;
+    radarJustEntered = false;
+  }
+  else
+  {
+    // no transition
+    radarJustEntered = false;
+    radarJustExited = false;
+  }
+  // persist current in-zone state for next comparison
+  radarPrevInZone = inAnyZone;
+  radarEnteredZone = inAnyZone;
+
+  // Now determine timed alert behavior based on speed severity (unchanged semantics)
+  if (!inAnyZone || bestSeverity == 0)
   {
     radarAlertActive = false;
+    // keep radarEnteredZone updated but no timed alerts
     return;
   }
 
   radarAlertActive = true;
   if (bestSeverity == 1)
   {
-    // caution: single short beep every 4s
+    // caution: single short beep every 2s
     radarDesiredIntervalMs = 2000;
     radarDesiredDurationMs = 150;
     radarDesiredFreqHz = 2000;
@@ -381,7 +421,7 @@ static void gps_display_task(void *pvParameters)
       showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 1);
 
       // Update radar alert logic (sets global desired beep interval/duration)
-      // updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh);
+      updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh);
       // TODO !!!!!!!!!!! uncomment above and remove test calls in loop()
     }
   }
@@ -525,8 +565,85 @@ void setup()
   screenIsOn = true;
 }
 
+static double bp1_test_coords[][2] = {
+    {28.070940840052412, -16.69912245270847},
+    {28.070323409166363, -16.701261412884566},
+    {28.07031394235545, -16.70177639700541},
+    {28.070380210014402, -16.702312838797962},
+    {28.07049381162043, -16.702999484292427},
+    {28.070702041177764, -16.704147476644774},
+    {28.070834575976086, -16.705102343035513},
+    {28.07066417406251, -16.706207413128165},
+};
+static double bp1_test_speeds_kmh[] = {
+    64.0,
+    64.0,
+    64.0,
+    64.0,
+    64.0,
+    64.0,
+    64.0,
+    64.0,
+};
+
+static double bp2_test_speeds_kmh[] = {
+    65.0,
+    66.0,
+    67.0,
+    67.0,
+    66.0,
+    67.0,
+    67.0,
+    68.0,
+};
+
+static double bp3_test_speeds_kmh[] = {
+    71.0,
+    71.0,
+    71.0,
+    70.0,
+    70.0,
+    71.0,
+    70.0,
+    70.0,
+};
+
+static bool test_running = false;
+static int test_step = 0;
+static unsigned long test_last_update_ms = 0;
+
+void test(bool bp_status, double test_coords[][2], double test_speeds[])
+{
+  if (test_running == false && bp_status == true)
+  {
+    test_last_update_ms = millis();
+    test_running = true;
+  }
+  else if (test_running == true && millis() - test_last_update_ms >= 1000)
+  {
+    test_last_update_ms = millis();
+    updateRadarAlerts(test_coords[test_step][0], test_coords[test_step][1], test_speeds[test_step]);
+    test_step++;
+    if (test_step >= 8)
+    {
+      test_step = 0;
+      test_running = false;
+    }
+    char tmp[32];
+    snprintf(tmp, sizeof(tmp), "test step: %d", test_step);
+    showMessage(tmp, h / 2 - 10, ST77XX_WHITE, 1);
+  }
+}
+
 void loop()
 {
+
+  // enter in radar zone
+  // test(button1Pressed, bp1_test_coords, bp1_test_speeds_kmh);
+  // enter in radar zone at max speed - 1
+  // test(button1Pressed, bp1_test_coords, bp2_test_speeds_kmh);
+  // enter in radar zone at max speed
+  // test(button1Pressed, bp1_test_coords, bp3_test_speeds_kmh);
 
   // Handle button events set by ISRs (debounced in loop)
   if (button1Pressed)
@@ -540,8 +657,6 @@ void loop()
       button1Pressed = false;
       // xx
       showMessage("Button1: wake 1m", h / 2 - 10, ST77XX_WHITE, 1);
-      beep(1500, 100);
-      updateRadarAlerts(28.070528843942306, -16.703099409962025, 71.0);
     }
     else
     {
@@ -559,8 +674,6 @@ void loop()
       button2Pressed = false;
       // yy
       showMessage("Button2: wake 1m", h / 2 - 10, ST77XX_WHITE, 1);
-      beep(1500, 100);
-      updateRadarAlerts(28.07043420656168, -16.702799022918615, 66.0);
     }
     else
     {
@@ -571,38 +684,53 @@ void loop()
 
   // Manage radar beeps non-blocking (timed beeps)
   unsigned long now = millis();
-  if (radarAlertActive)
+  // If we just entered a radar zone (transition), give a single immediate beep
+  if (radarJustEntered)
   {
+    // single short entry beep (non-blocking via timer-driven startTone)
     if (!beepCurrentlyOn)
     {
-      if (now - lastBeepTrigger >= radarDesiredIntervalMs)
+      startTone(2000);
+      beepCurrentlyOn = true;
+      beepOnUntil = now + 150; // 150ms entry beep
+      lastBeepTrigger = now;
+    }
+    radarJustEntered = false;
+  }
+  else
+  {
+    if (radarAlertActive)
+    {
+      if (!beepCurrentlyOn)
       {
-        startTone(radarDesiredFreqHz);
-        beepCurrentlyOn = true;
-        beepOnUntil = now + radarDesiredDurationMs;
-        lastBeepTrigger = now;
+        if (now - lastBeepTrigger >= radarDesiredIntervalMs)
+        {
+          startTone(radarDesiredFreqHz);
+          beepCurrentlyOn = true;
+          beepOnUntil = now + radarDesiredDurationMs;
+          lastBeepTrigger = now;
+        }
+      }
+      else
+      {
+        if (now >= beepOnUntil)
+        {
+          stopTone();
+          beepCurrentlyOn = false;
+        }
       }
     }
     else
     {
-      if (now >= beepOnUntil)
+      if (beepCurrentlyOn)
       {
         stopTone();
         beepCurrentlyOn = false;
       }
+      // reset trigger so we don't immediately beep when alert appears
+      lastBeepTrigger = now;
     }
   }
-  else
-  {
-    if (beepCurrentlyOn)
-    {
-      stopTone();
-      beepCurrentlyOn = false;
-    }
-    // reset trigger so we don't immediately beep when alert appears
-    lastBeepTrigger = now;
-  }
-
   // Short delay for loop granularity (100ms) - keeps responsiveness for beeps
   delay(100);
 }
