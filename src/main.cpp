@@ -57,6 +57,7 @@ typedef struct
   double speed_kmh;
   bool valid;
   char raw[128];
+  int sats;
 } GPSMsg;
 
 static QueueHandle_t gpsQueue = NULL;   // queue for parsed GPS messages (to display)
@@ -170,6 +171,8 @@ static void uart_event_task(void *pvParameters)
         msg.lng = msg.valid ? gps.location.lng() : 0.0;
         msg.alt = gps.altitude.isValid() ? gps.altitude.meters() : 0.0;
         msg.speed_kmh = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
+        // Satellite count (may be 0 if no fix)
+        msg.sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
         if (xQueueSend(gpsQueue, &msg, 0) != pdTRUE)
         {
           Serial.println("[GPS UART] Warning: gpsQueue send failed");
@@ -204,6 +207,9 @@ static void gps_display_task(void *pvParameters)
       {
         showMessage("GPS: no fix", 20, ST77XX_RED, 1);
         // still show raw debug even if no fix
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "No fix - sats: %d", msg.sats);
+        showMessage(tmp, 20, ST77XX_YELLOW, 1);
         showMessage(msg.raw, h - 18, ST77XX_YELLOW, 1);
         continue;
       }
@@ -226,6 +232,11 @@ static void gps_display_task(void *pvParameters)
       {
         showMessage(msg.raw, h - 18, ST77XX_YELLOW, 1);
       }
+
+      // Show fix status + satellite count under speed
+      char status[64];
+      snprintf(status, sizeof(status), "Fix: %s  Sats: %d", msg.valid ? "YES" : "NO", msg.sats);
+      showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 1);
     }
   }
 }
