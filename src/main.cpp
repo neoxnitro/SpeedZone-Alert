@@ -144,9 +144,9 @@ static volatile bool radarJustEntered = false; // set true for one update when e
 static volatile bool radarJustExited = false;  // set true for one update when exiting
 
 // Determine radar alerts from current position + speed. Chooses highest-severity alert
-static void updateRadarAlerts(double lat, double lng, double speedKmh)
+static void updateRadarAlerts(double lat, double lng, double speedKmh, int sats = -1)
 {
-  Serial.printf("%.6f, %.6f, %.1f\n", lat, lng, speedKmh);
+  Serial.printf("%.6f, %.6f, %.1f, %d\n", lat, lng, speedKmh, sats);
   // Determine whether we're inside ANY radar polygon (independent of speed)
   bool inAnyZone = false;
   // severity: 0 = none, 1 = caution, 2 = over limit
@@ -155,9 +155,9 @@ static void updateRadarAlerts(double lat, double lng, double speedKmh)
   for (int i = 0; i < RADAR_COUNT; ++i)
   {
     const Radar &r = radars[i];
-    // quick filter: skip if centroid > 500m away
+    // quick filter: skip if centroid > 700m away
     double d = haversineMeters(lat, lng, r.centroidLat, r.centroidLng);
-    if (d > 500.0)
+    if (d > 700.0)
       continue;
 
     // polygon test
@@ -397,12 +397,17 @@ static void gps_display_task(void *pvParameters)
     {
       if (!msg.valid)
       {
-        showMessage("GPS: no fix", 20, ST77XX_RED, 1);
-        Serial.println("GPS: no fix");
-        // still show raw debug even if no fix
-        char tmp[64];
-        snprintf(tmp, sizeof(tmp), "No fix - sats: %d", msg.sats);
-        showMessage(tmp, 20, ST77XX_YELLOW, 1);
+        char status[64];
+        snprintf(status, sizeof(status), "Fix: %s  Sats: %d", msg.valid ? "YES" : "NO", msg.sats);
+        showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 1);
+        /*
+                showMessage("GPS: no fix", 20, ST77XX_RED, 1);
+                // Serial.println("GPS: no fix");
+                //  still show raw debug even if no fix
+                char tmp[64];
+                snprintf(tmp, sizeof(tmp), "No fix - sats: %d", msg.sats);
+                showMessage(tmp, 20, ST77XX_YELLOW, 1);
+        */
         // showMessage(msg.raw, h - 18, ST77XX_YELLOW, 1);
         continue;
       }
@@ -421,10 +426,10 @@ static void gps_display_task(void *pvParameters)
       snprintf(linebuf, sizeof(linebuf), "Speed: %.1f km/h", msg.speed_kmh);
       showMessage(linebuf, 76, ST77XX_WHITE, 1);
       // Debug raw transfer (bottom of screen)
-      if (msg.raw[0] != '\0')
+      /*if (msg.raw[0] != '\0')
       {
         showMessage(msg.raw, h - 18, ST77XX_YELLOW, 1);
-      }
+      }*/
 
       // Show fix status + satellite count under speed
       char status[64];
@@ -432,7 +437,7 @@ static void gps_display_task(void *pvParameters)
       showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 1);
 
       // Update radar alert logic (sets global desired beep interval/duration)
-      updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh);
+      updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh, msg.sats);
       // Yield briefly so the idle task on the other core can run and the watchdog
       // won't be starved by long display operations. Adjust the delay as needed.
       vTaskDelay(2);
@@ -692,7 +697,7 @@ void loop()
 
   esp_task_wdt_reset();
 
-  test_app();
+  // test_app();
 
   // Handle button events set by ISRs (debounced in loop)
   if (button1Pressed)
