@@ -9,8 +9,6 @@
 #include <ESP32Servo.h>
 #include <esp_task_wdt.h>
 #include <esp_sleep.h>
-// MQTT
-#include <PubSubClient.h>
 // GPS parsing + low-level UART driver
 #include <TinyGPSPlus.h>
 #include "driver/uart.h"
@@ -83,10 +81,10 @@ typedef struct
 
 // Single radar list (expandable). Initialize with the provided polygon and limit.
 // Polygon: 3 points provided by user (triangle)
-static Radar radars[] = {
+static const Radar radars[] = {
     // radar 0
-    {{28.070786571753445, 28.069711613435498, 28.07059817777401},
-     {-16.70479742484261, -16.70110496452421, -16.70110496452421},
+    {{28.070786, 28.069711, 28.070598},
+     {-16.704797, -16.701104, -16.701104},
      3,
      70,
      28.070806175652283,
@@ -98,6 +96,13 @@ static Radar radars[] = {
      70,
      28.070806175652283,
      -16.704801935638155},
+    // radar 1
+    {{28.056966306914898, 28.058879736842236, 28.058574564049025},
+     {-16.58595846755022, -16.5812286320508, -16.581102657945877},
+     3,
+     120,
+     28.057751686349476,
+     -16.583807174456027},
 };
 static const int RADAR_COUNT = sizeof(radars) / sizeof(radars[0]);
 
@@ -141,6 +146,7 @@ static volatile bool radarJustExited = false;  // set true for one update when e
 // Determine radar alerts from current position + speed. Chooses highest-severity alert
 static void updateRadarAlerts(double lat, double lng, double speedKmh)
 {
+  Serial.printf("%.6f, %.6f, %.1f\n", lat, lng, speedKmh);
   // Determine whether we're inside ANY radar polygon (independent of speed)
   bool inAnyZone = false;
   // severity: 0 = none, 1 = caution, 2 = over limit
@@ -148,7 +154,7 @@ static void updateRadarAlerts(double lat, double lng, double speedKmh)
 
   for (int i = 0; i < RADAR_COUNT; ++i)
   {
-    Radar &r = radars[i];
+    const Radar &r = radars[i];
     // quick filter: skip if centroid > 500m away
     double d = haversineMeters(lat, lng, r.centroidLat, r.centroidLng);
     if (d > 500.0)
@@ -222,6 +228,9 @@ static void updateRadarAlerts(double lat, double lng, double speedKmh)
 
 static QueueHandle_t gpsQueue = NULL;   // queue for parsed GPS messages (to display)
 static QueueHandle_t uart_queue = NULL; // uart event queue
+// Task handles (used when pinning tasks to cores)
+static TaskHandle_t uartTaskHandle = NULL;
+static TaskHandle_t displayTaskHandle = NULL;
 
 // Forward declarations
 static void uart_event_task(void *pvParameters);
@@ -321,16 +330,16 @@ static void uart_event_task(void *pvParameters)
       {
         int len = uart_read_bytes(GPS_UART, dtmp, event.size, portMAX_DELAY);
         // Debug: print RX activity to Serial console
-        Serial.printf("[GPS UART] DATA received: %d bytes\n", len);
-        Serial.print("[GPS UART] HEX: ");
-        for (int i = 0; i < len; ++i)
+        // Serial.printf("[GPS UART] DATA received: %d bytes\n", len);
+        // Serial.print("[GPS UART] HEX: ");
+        /*for (int i = 0; i < len; ++i)
         {
           Serial.printf("%02X ", dtmp[i]);
-        }
-        Serial.println();
+        }*/
+        /*Serial.println();
         Serial.print("[GPS UART] STR: ");
         Serial.write(dtmp, len);
-        Serial.println();
+        Serial.println();*/
         for (int i = 0; i < len; ++i)
         {
           gps.encode(dtmp[i]);
@@ -355,19 +364,20 @@ static void uart_event_task(void *pvParameters)
         msg.speed_kmh = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
         // Satellite count (may be 0 if no fix)
         msg.sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
-        if (xQueueSend(gpsQueue, &msg, 0) != pdTRUE)
+        xQueueSend(gpsQueue, &msg, 0);
+        /*if (xQueueSend(gpsQueue, &msg, 0) != pdTRUE)
         {
           Serial.println("[GPS UART] Warning: gpsQueue send failed");
         }
         else
         {
           Serial.println("[GPS UART] Message queued for display");
-        }
+        }*/
       }
       else if (event.type == UART_FIFO_OVF || event.type == UART_BUFFER_FULL)
       {
         // Overflow, flush input
-        Serial.println("[GPS UART] FIFO overflow / buffer full - flushing");
+        // Serial.println("[GPS UART] FIFO overflow / buffer full - flushing");
         uart_flush_input(GPS_UART);
         xQueueReset(uart_queue);
       }
@@ -388,11 +398,12 @@ static void gps_display_task(void *pvParameters)
       if (!msg.valid)
       {
         showMessage("GPS: no fix", 20, ST77XX_RED, 1);
+        Serial.println("GPS: no fix");
         // still show raw debug even if no fix
         char tmp[64];
         snprintf(tmp, sizeof(tmp), "No fix - sats: %d", msg.sats);
         showMessage(tmp, 20, ST77XX_YELLOW, 1);
-        showMessage(msg.raw, h - 18, ST77XX_YELLOW, 1);
+        // showMessage(msg.raw, h - 18, ST77XX_YELLOW, 1);
         continue;
       }
 
@@ -422,7 +433,9 @@ static void gps_display_task(void *pvParameters)
 
       // Update radar alert logic (sets global desired beep interval/duration)
       updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh);
-      // TODO !!!!!!!!!!! uncomment above and remove test calls in loop()
+      // Yield briefly so the idle task on the other core can run and the watchdog
+      // won't be starved by long display operations. Adjust the delay as needed.
+      vTaskDelay(2);
     }
   }
 }
@@ -439,10 +452,10 @@ void setup()
   // Turn on backlight if present
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
-  Serial.println("Backlight set HIGH on pin " + String(TFT_BL));
+  // Serial.println("Backlight set HIGH on pin " + String(TFT_BL));
 
   // Init display with confirmed resolution 240x135 and draw 2px border
-  Serial.println("Init display 240x135 and draw 2px border...");
+  // Serial.println("Init display 240x135 and draw 2px border...");
   // Use the confirmed physical resolution
   tft.init(135, 240);
   tft.setRotation(1);
@@ -468,7 +481,7 @@ void setup()
   tft.print("x");
   tft.println(h);
 
-  Serial.printf("Border drawn. display width=%d height=%d\n", w, h);
+  // Serial.printf("Border drawn. display width=%d height=%d\n", w, h);
 
   // --- Begin migrated logic from main2 setup ---
   showMessage("Booting ...", 10, ST77XX_WHITE, 2);
@@ -551,9 +564,12 @@ void setup()
     gpsQueue = xQueueCreate(4, sizeof(GPSMsg));
 
     // create a task to handle UART events (runs when data arrives)
-    xTaskCreate(uart_event_task, "uart_event_task", 4096, NULL, 12, NULL);
+    // pin the UART event task to CPU 0 so it won't interfere with Arduino `loop()` on CPU 1
+    xTaskCreatePinnedToCore(uart_event_task, "uart_event_task", 4096, NULL, 12, &uartTaskHandle, 0);
     // create a task to display GPS data (blocks on gpsQueue)
-    xTaskCreate(gps_display_task, "gps_display_task", 4096, NULL, 1, NULL);
+    // pin the display task to CPU 0 or 1 depending on your responsiveness needs.
+    // Here we pin the display to CPU 0 to keep long display operations off the Arduino core (CPU 1)
+    xTaskCreatePinnedToCore(gps_display_task, "gps_display_task", 8192, NULL, 1, &displayTaskHandle, 0);
   }
   // --- End migrated logic from main2 setup ---
   // Clear only the interior so the border drawn earlier remains visible
@@ -565,7 +581,7 @@ void setup()
   screenIsOn = true;
 }
 
-static double bp1_test_coords[][2] = {
+static const double bp1_test_coords[][2] = {
     {28.070940840052412, -16.69912245270847},
     {28.070323409166363, -16.701261412884566},
     {28.07031394235545, -16.70177639700541},
@@ -575,7 +591,7 @@ static double bp1_test_coords[][2] = {
     {28.070834575976086, -16.705102343035513},
     {28.07066417406251, -16.706207413128165},
 };
-static double bp1_test_speeds_kmh[] = {
+static const double bp1_test_speeds_kmh[] = {
     64.0,
     64.0,
     64.0,
@@ -586,7 +602,7 @@ static double bp1_test_speeds_kmh[] = {
     64.0,
 };
 
-static double bp2_test_speeds_kmh[] = {
+static const double bp2_test_speeds_kmh[] = {
     65.0,
     66.0,
     67.0,
@@ -597,7 +613,7 @@ static double bp2_test_speeds_kmh[] = {
     68.0,
 };
 
-static double bp3_test_speeds_kmh[] = {
+static const double bp3_test_speeds_kmh[] = {
     71.0,
     71.0,
     71.0,
@@ -612,7 +628,7 @@ static bool test_running = false;
 static int test_step = 0;
 static unsigned long test_last_update_ms = 0;
 
-void test(bool bp_status, double test_coords[][2], double test_speeds[])
+uint8_t test(bool bp_status, const double test_coords[][2], const double test_speeds[])
 {
   if (test_running == false && bp_status == true)
   {
@@ -628,22 +644,55 @@ void test(bool bp_status, double test_coords[][2], double test_speeds[])
     {
       test_step = 0;
       test_running = false;
+      return 0;
     }
     char tmp[32];
     snprintf(tmp, sizeof(tmp), "test step: %d", test_step);
-    showMessage(tmp, h / 2 - 10, ST77XX_WHITE, 1);
+    showMessage(tmp, h / 2 - 14, ST77XX_WHITE, 1);
+  }
+  return 1;
+}
+
+static bool test_app_running = false;
+
+void test_app()
+{
+  static uint8_t test_num = 0;
+
+  if (test_app_running == false)
+    return;
+
+  switch (test_num)
+  {
+  case 0:
+    showMessage("Test 0: enter radar zone", h / 2 - 10, ST77XX_WHITE, 1);
+    if (test(true, bp1_test_coords, bp1_test_speeds_kmh) == 0)
+      test_num++;
+    break;
+  case 1:
+    showMessage("Test 1: stay below limit", h / 2 - 10, ST77XX_WHITE, 1);
+    if (test(true, bp1_test_coords, bp2_test_speeds_kmh) == 0)
+      test_num++;
+    break;
+  case 2:
+    showMessage("Test 2: enter radar zone at max speed - 1", h / 2 - 10, ST77XX_WHITE, 1);
+    if (test(true, bp1_test_coords, bp3_test_speeds_kmh) == 0)
+      test_num++;
+    break;
+  default:
+    showMessage("Test complete", h / 2 - 10, ST77XX_WHITE, 1);
+    test_app_running = false;
+    test_num = 0;
+    break;
   }
 }
 
 void loop()
 {
 
-  // enter in radar zone
-  // test(button1Pressed, bp1_test_coords, bp1_test_speeds_kmh);
-  // enter in radar zone at max speed - 1
-  // test(button1Pressed, bp1_test_coords, bp2_test_speeds_kmh);
-  // enter in radar zone at max speed
-  // test(button1Pressed, bp1_test_coords, bp3_test_speeds_kmh);
+  esp_task_wdt_reset();
+
+  test_app();
 
   // Handle button events set by ISRs (debounced in loop)
   if (button1Pressed)
@@ -656,7 +705,7 @@ void loop()
       // clear flag early
       button1Pressed = false;
       // xx
-      showMessage("Button1: wake 1m", h / 2 - 10, ST77XX_WHITE, 1);
+      test_app_running = true;
     }
     else
     {
@@ -674,13 +723,14 @@ void loop()
       button2Pressed = false;
       // yy
       showMessage("Button2: wake 1m", h / 2 - 10, ST77XX_WHITE, 1);
+
+      test_app_running = false;
     }
     else
     {
       button2Pressed = false;
     }
   }
-  esp_task_wdt_reset();
 
   // Manage radar beeps non-blocking (timed beeps)
   unsigned long now = millis();
