@@ -84,9 +84,12 @@ void loop() {
   }
   
   // Check if GPS data is stale
+  static unsigned long lastGPSWarning = 0;
   if (millis() > 5000 && gps.charsProcessed() < 10) {
-    Serial.println(F("No GPS data received. Check wiring!"));
-    delay(5000);
+    if (millis() - lastGPSWarning > 5000) {
+      Serial.println(F("No GPS data received. Check wiring!"));
+      lastGPSWarning = millis();
+    }
   }
   
   // Handle buzzer alerts
@@ -191,29 +194,46 @@ void displaySpeedWarning(int cameraIndex, double speed, double distance) {
 
 void handleAlerts() {
   static unsigned long lastBeepTime = 0;
+  static unsigned long beepStartTime = 0;
+  static bool isBeeping = false;
   unsigned long currentTime = millis();
   
-  switch (currentAlert) {
-    case DANGER:
-      // Rapid beeping in danger zone
-      if (currentTime - lastBeepTime > DANGER_BEEP_INTERVAL) {
-        beep(BEEP_DURATION);
-        lastBeepTime = currentTime;
-      }
-      break;
-      
-    case WARNING:
-      // Slower beeping in warning zone
-      if (currentTime - lastBeepTime > WARNING_BEEP_INTERVAL) {
-        beep(BEEP_DURATION);
-        lastBeepTime = currentTime;
-      }
-      break;
-      
-    case NONE:
-    default:
-      // No alert
-      break;
+  // Handle active beep completion
+  if (isBeeping && (currentTime - beepStartTime >= BEEP_DURATION)) {
+    digitalWrite(BUZZER_PIN, LOW);
+    isBeeping = false;
+  }
+  
+  // Check if it's time for a new beep
+  if (!isBeeping) {
+    bool shouldBeep = false;
+    unsigned long beepInterval = 0;
+    
+    switch (currentAlert) {
+      case DANGER:
+        // Rapid beeping in danger zone
+        beepInterval = DANGER_BEEP_INTERVAL;
+        shouldBeep = (currentTime - lastBeepTime > beepInterval);
+        break;
+        
+      case WARNING:
+        // Slower beeping in warning zone
+        beepInterval = WARNING_BEEP_INTERVAL;
+        shouldBeep = (currentTime - lastBeepTime > beepInterval);
+        break;
+        
+      case NONE:
+      default:
+        // No alert
+        break;
+    }
+    
+    if (shouldBeep) {
+      digitalWrite(BUZZER_PIN, HIGH);
+      beepStartTime = currentTime;
+      lastBeepTime = currentTime;
+      isBeeping = true;
+    }
   }
 }
 
@@ -235,16 +255,13 @@ double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
   return R * c; // Distance in meters
 }
 
-void beep(int duration) {
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(duration);
-  digitalWrite(BUZZER_PIN, LOW);
-}
-
 void startupBeep() {
   // Three quick beeps to indicate system start
+  // Note: Blocking delays are acceptable during setup
   for (int i = 0; i < 3; i++) {
-    beep(100);
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(100);
+    digitalWrite(BUZZER_PIN, LOW);
     delay(100);
   }
 }

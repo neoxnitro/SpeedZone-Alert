@@ -75,7 +75,7 @@ SpeedCamera cameras[] = {
 ```
 - **Location**: Interstate highway
 - **Speed Limit**: 100 km/h (62 mph)
-- **Higher limit for highway speeds
+- **Higher limit for highway speeds**
 
 ### School Zone Camera
 ```cpp
@@ -83,7 +83,7 @@ SpeedCamera cameras[] = {
 ```
 - **Location**: School zone
 - **Speed Limit**: 30 km/h (19 mph)
-- **Lower limit for safety
+- **Lower limit for safety**
 
 ## Database Best Practices
 
