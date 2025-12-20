@@ -1,0 +1,32 @@
+# Arduino build files
+build/
+*.hex
+*.elf
+*.bin
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+.DS_Store
+Thumbs.db
+*~
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Build artifacts
+*.o
+*.a
+
+# Dependencies
+libraries/
+
+# Personal configuration backups
+config.h.bak
+*.local
