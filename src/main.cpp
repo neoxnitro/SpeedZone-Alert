@@ -68,69 +68,8 @@ typedef struct
 } GPSMsg;
 
 // --- Radar detection structures and helpers ---
-typedef struct
-{
-  // polygon points (lat,lng) - support up to 8 points
-  double lat[8];
-  double lng[8];
-  int pointCount;
-  int speedLimitKmh;
-  double centroidLat;
-  double centroidLng;
-} Radar;
-
-// Single radar list (expandable). Initialize with the provided polygon and limit.
-// Polygon: 3 points provided by user (triangle)
-static const Radar radars[] = {
-    // radar 0
-    {{28.070786, 28.069711, 28.070598},
-     {-16.704797, -16.701104, -16.701104},
-     3,
-     70,
-     28.070806175652283,
-     -16.704801935638155},
-    // radar 0
-    {{28.070796708895237, 28.070143499853952, 28.071743351749255},
-     {-16.704812664450014, -16.707344669750903, -16.70736617792127},
-     3,
-     70,
-     28.070806175652283,
-     -16.704801935638155},
-    // radar 1
-    {{28.056966306914898, 28.058879736842236, 28.058574564049025},
-     {-16.58595846755022, -16.5812286320508, -16.581102657945877},
-     3,
-     120,
-     28.057751686349476,
-     -16.583807174456027},
-};
-static const int RADAR_COUNT = sizeof(radars) / sizeof(radars[0]);
-
-// Haversine (meters)
-static double haversineMeters(double lat1, double lon1, double lat2, double lon2)
-{
-  const double R = 6371000.0; // earth radius meters
-  double dLat = (lat2 - lat1) * M_PI / 180.0;
-  double dLon = (lon2 - lon1) * M_PI / 180.0;
-  double a = sin(dLat / 2) * sin(dLat / 2) + cos(lat1 * M_PI / 180.0) * cos(lat2 * M_PI / 180.0) * sin(dLon / 2) * sin(dLon / 2);
-  double c = 2 * atan2(sqrt(a), sqrt(1 - a));
-  return R * c;
-}
-
-// Ray-casting point-in-polygon test (lat/lon treated as planar since zones are small)
-static bool pointInPolygon(double lat, double lon, const Radar &r)
-{
-  bool inside = false;
-  for (int i = 0, j = r.pointCount - 1; i < r.pointCount; j = i++)
-  {
-    double xi = r.lat[i], yi = r.lng[i];
-    double xj = r.lat[j], yj = r.lng[j];
-    bool intersect = ((yi > lon) != (yj > lon)) && (lat < (xj - xi) * (lon - yi) / (yj - yi + 1e-12) + xi);
-    if (intersect)
-      inside = !inside;
-  }
-  return inside;
-}
+#include "radar.h"
+static RadarAlertManager radarManager;
 
 // Radar alert state: set by display task, consumed by loop to produce timed beeps
 static volatile bool radarAlertActive = false;
@@ -138,93 +77,14 @@ static unsigned long radarDesiredIntervalMs = 0;
 static unsigned long radarDesiredDurationMs = 0;
 static uint32_t radarDesiredFreqHz = 0;
 static volatile bool radarEnteredZone = false;
-// Track transitions into/out of any radar zone (independent of speed/severity)
-static volatile bool radarPrevInZone = false;  // previous measured "in zone" state
-static volatile bool radarJustEntered = false; // set true for one update when entering
-static volatile bool radarJustExited = false;  // set true for one update when exiting
 
-// Determine radar alerts from current position + speed. Chooses highest-severity alert
-static void updateRadarAlerts(double lat, double lng, double speedKmh, int sats = -1)
-{
-  Serial.printf("%.6f, %.6f, %.1f, %d\n", lat, lng, speedKmh, sats);
-  // Determine whether we're inside ANY radar polygon (independent of speed)
-  bool inAnyZone = false;
-  // severity: 0 = none, 1 = caution, 2 = over limit
-  int bestSeverity = 0;
-
-  for (int i = 0; i < RADAR_COUNT; ++i)
-  {
-    const Radar &r = radars[i];
-    // quick filter: skip if centroid > 700m away
-    double d = haversineMeters(lat, lng, r.centroidLat, r.centroidLng);
-    if (d > 700.0)
-      continue;
-
-    // polygon test
-    if (!pointInPolygon(lat, lng, r))
-      continue;
-
-    // we are inside at least one radar polygon
-    inAnyZone = true;
-
-    // evaluate speed-based severity for timed alerts
-    if (speedKmh >= r.speedLimitKmh)
-    {
-      if (bestSeverity < 2)
-        bestSeverity = 2;
-    }
-    else if (speedKmh >= r.speedLimitKmh - 5)
-    {
-      if (bestSeverity < 1)
-        bestSeverity = 1;
-    }
-  }
-
-  // Detect transitions (enter / exit) regardless of severity.
-  if (inAnyZone && !radarPrevInZone)
-  {
-    radarJustEntered = true;
-    radarJustExited = false;
-  }
-  else if (!inAnyZone && radarPrevInZone)
-  {
-    radarJustExited = true;
-    radarJustEntered = false;
-  }
-  else
-  {
-    // no transition
-    radarJustEntered = false;
-    radarJustExited = false;
-  }
-  // persist current in-zone state for next comparison
-  radarPrevInZone = inAnyZone;
-  radarEnteredZone = inAnyZone;
-
-  // Now determine timed alert behavior based on speed severity (unchanged semantics)
-  if (!inAnyZone || bestSeverity == 0)
-  {
-    radarAlertActive = false;
-    // keep radarEnteredZone updated but no timed alerts
-    return;
-  }
-
-  radarAlertActive = true;
-  if (bestSeverity == 1)
-  {
-    // caution: single short beep every 2s
-    radarDesiredIntervalMs = 2000;
-    radarDesiredDurationMs = 150;
-    radarDesiredFreqHz = 2000;
-  }
-  else // severity 2
-  {
-    // over limit: louder beep every 1s
-    radarDesiredIntervalMs = 1000;
-    radarDesiredDurationMs = 300;
-    radarDesiredFreqHz = 2500;
-  }
-}
+// --- Buzzer timer and state ---
+static hw_timer_t *buzzerTimer = NULL;
+static volatile bool buzzerState = false;
+// Non-blocking beep state (managed in loop)
+static unsigned long lastBeepTrigger = 0;
+static unsigned long beepOnUntil = 0;
+static bool beepCurrentlyOn = false;
 
 static QueueHandle_t gpsQueue = NULL;   // queue for parsed GPS messages (to display)
 static QueueHandle_t uart_queue = NULL; // uart event queue
@@ -257,6 +117,89 @@ unsigned long lastButton2Handled = 0;
 const unsigned long BUTTON_DEBOUNCE_MS = 250;
 unsigned long wakeExpireMillis = 0; // if > millis() keep screen on for this long
 
+// Timer ISR toggles the two buzzer pins in opposite phase to increase swing.
+void IRAM_ATTR onBuzzerTimer()
+{
+  buzzerState = !buzzerState;
+  gpio_set_level((gpio_num_t)BUZZER_PIN_A, buzzerState ? 1 : 0);
+  gpio_set_level((gpio_num_t)BUZZER_PIN_B, buzzerState ? 0 : 1);
+}
+
+// ISR functions: keep them tiny and only set volatile flags.
+void IRAM_ATTR button1ISR()
+{
+  button1Pressed = true;
+}
+
+void IRAM_ATTR button2ISR()
+{
+  button2Pressed = true;
+}
+
+// --- Buzzer control functions ---
+// Start a square wave on the two pins with given frequency (Hz)
+static void startTone(uint32_t freqHz)
+{
+  if (freqHz == 0)
+    return;
+  uint32_t halfPeriodUs = 500000UL / freqHz; // half period in microseconds
+  if (!buzzerTimer)
+  {
+    // Use timer 0, prescaler 80 -> 1 tick = 1 microsecond
+    buzzerTimer = timerBegin(0, 80, true);
+    timerAttachInterrupt(buzzerTimer, &onBuzzerTimer, true);
+  }
+  timerAlarmWrite(buzzerTimer, halfPeriodUs, true);
+  timerAlarmEnable(buzzerTimer);
+}
+
+static void stopTone()
+{
+  if (buzzerTimer)
+  {
+    timerAlarmDisable(buzzerTimer);
+  }
+  gpio_set_level((gpio_num_t)BUZZER_PIN_A, 0);
+  gpio_set_level((gpio_num_t)BUZZER_PIN_B, 0);
+  buzzerState = false;
+}
+
+// Simple blocking beep helper (starts tone, waits, stops tone)
+static void beep(uint32_t freqHz, uint32_t durationMs)
+{
+  if (freqHz == 0 || durationMs == 0)
+    return;
+  startTone(freqHz);
+  delay(durationMs);
+  stopTone();
+}
+
+// Determine radar alerts from current position + speed. Chooses highest-severity alert
+static void updateRadarAlerts(double lat, double lng, double speedKmh, int sats = -1)
+{
+  Serial.printf("%.6f, %.6f, %.1f, %d\n", lat, lng, speedKmh, sats);
+  RadarAlertResult r = radarManager.update(lat, lng, speedKmh);
+
+  if (!r.inZone || r.severity == 0)
+  {
+    radarAlertActive = false;
+    return;
+  }
+
+  // if severity changed, reset last beep time to trigger immediate beep
+  if (!radarAlertActive || r.intervalMs != radarDesiredIntervalMs ||
+      r.durationMs != radarDesiredDurationMs || r.freqHz != radarDesiredFreqHz)
+  {
+    stopTone();
+    lastBeepTrigger = 0;
+  }
+
+  radarAlertActive = true;
+  radarDesiredIntervalMs = r.intervalMs;
+  radarDesiredDurationMs = r.durationMs;
+  radarDesiredFreqHz = r.freqHz;
+}
+
 // Helper to draw messages using Adafruit GFX (replaces TFT_eSPI showMessage)
 void showMessage(const char *msg, int y, uint16_t color = ST77XX_WHITE, uint8_t size = 2)
 {
@@ -287,33 +230,6 @@ void showMessage(const char *msg, int y, uint16_t color = ST77XX_WHITE, uint8_t 
   tft.setTextColor(color, ST77XX_BLACK);
   tft.setCursor(cx, y);
   tft.print(msg);
-}
-
-// ISR functions: keep them tiny and only set volatile flags.
-void IRAM_ATTR button1ISR()
-{
-  button1Pressed = true;
-}
-
-void IRAM_ATTR button2ISR()
-{
-  button2Pressed = true;
-}
-
-// --- Buzzer timer and state ---
-static hw_timer_t *buzzerTimer = NULL;
-static volatile bool buzzerState = false;
-// Non-blocking beep state (managed in loop)
-static unsigned long lastBeepTrigger = 0;
-static unsigned long beepOnUntil = 0;
-static bool beepCurrentlyOn = false;
-
-// Timer ISR toggles the two buzzer pins in opposite phase to increase swing.
-void IRAM_ATTR onBuzzerTimer()
-{
-  buzzerState = !buzzerState;
-  gpio_set_level((gpio_num_t)BUZZER_PIN_A, buzzerState ? 1 : 0);
-  gpio_set_level((gpio_num_t)BUZZER_PIN_B, buzzerState ? 0 : 1);
 }
 
 // UART event task: runs when UART driver posts an event (interrupt-driven)
@@ -437,7 +353,7 @@ static void gps_display_task(void *pvParameters)
       showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 1);
 
       // Update radar alert logic (sets global desired beep interval/duration)
-      updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh, msg.sats);
+      // updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh, msg.sats);
       // Yield briefly so the idle task on the other core can run and the watchdog
       // won't be starved by long display operations. Adjust the delay as needed.
       vTaskDelay(2);
@@ -586,66 +502,213 @@ void setup()
   screenIsOn = true;
 }
 
-static const double bp1_test_coords[][2] = {
-    {28.070940840052412, -16.69912245270847},
-    {28.070323409166363, -16.701261412884566},
-    {28.07031394235545, -16.70177639700541},
-    {28.070380210014402, -16.702312838797962},
-    {28.07049381162043, -16.702999484292427},
-    {28.070702041177764, -16.704147476644774},
-    {28.070834575976086, -16.705102343035513},
-    {28.07066417406251, -16.706207413128165},
-};
-static const double bp1_test_speeds_kmh[] = {
-    64.0,
-    64.0,
-    64.0,
-    64.0,
-    64.0,
-    64.0,
-    64.0,
-    64.0,
-};
-
-static const double bp2_test_speeds_kmh[] = {
-    65.0,
-    66.0,
-    67.0,
-    67.0,
-    66.0,
-    67.0,
-    67.0,
-    68.0,
-};
-
-static const double bp3_test_speeds_kmh[] = {
-    71.0,
-    71.0,
-    71.0,
-    70.0,
-    70.0,
-    71.0,
-    70.0,
-    70.0,
+static const double bp1_test_coords[][4] = {
+    {28.058701, -16.581032, 106.7, 6},
+    {28.058701, -16.581032, 106.7, 6},
+    {28.058701, -16.581032, 106.7, 6},
+    {28.058681, -16.581088, 106.4, 6},
+    {28.058681, -16.581088, 106.4, 6},
+    {28.058681, -16.581088, 106.4, 6},
+    {28.058681, -16.581088, 106.4, 6},
+    {28.058661, -16.581142, 105.8, 6},
+    {28.058661, -16.581142, 105.8, 6},
+    {28.058661, -16.581142, 105.8, 6},
+    {28.058661, -16.581142, 105.8, 6},
+    {28.058642, -16.581196, 105.3, 6},
+    {28.058642, -16.581196, 105.3, 6},
+    {28.058642, -16.581196, 105.3, 6},
+    {28.058642, -16.581196, 105.3, 6},
+    {28.058621, -16.581251, 105.1, 6},
+    {28.058621, -16.581251, 105.1, 6},
+    {28.058621, -16.581251, 105.1, 6},
+    {28.058621, -16.581251, 105.1, 6},
+    {28.058601, -16.581304, 104.5, 6},
+    {28.058601, -16.581304, 104.5, 6},
+    {28.058601, -16.581304, 104.5, 6},
+    {28.058601, -16.581304, 104.5, 6},
+    {28.058581, -16.581358, 104.2, 6},
+    {28.058581, -16.581358, 104.2, 6},
+    {28.058581, -16.581358, 104.2, 6},
+    {28.058581, -16.581358, 104.2, 6},
+    {28.058561, -16.581412, 104.0, 6},
+    {28.058561, -16.581412, 104.0, 6},
+    {28.058561, -16.581412, 116.0, 6},
+    {28.058561, -16.581412, 116.0, 6},
+    {28.058543, -16.581468, 116.8, 6},
+    {28.058543, -16.581468, 116.8, 6},
+    {28.058543, -16.581468, 116.8, 6},
+    {28.058543, -16.581468, 116.8, 6},
+    {28.058523, -16.581522, 122.6, 6},
+    {28.058523, -16.581522, 122.6, 6},
+    {28.058523, -16.581522, 122.6, 6},
+    {28.058523, -16.581522, 122.6, 6},
+    {28.058504, -16.581575, 116.1, 6},
+    {28.058504, -16.581575, 116.1, 6},
+    {28.058504, -16.581575, 116.1, 6},
+    {28.058504, -16.581575, 116.1, 6},
+    {28.058486, -16.581630, 102.9, 6},
+    {28.058486, -16.581630, 102.9, 6},
+    {28.058486, -16.581630, 102.9, 6},
+    {28.058486, -16.581630, 102.9, 6},
+    {28.058468, -16.581685, 102.7, 6},
+    {28.058468, -16.581685, 102.7, 6},
+    {28.058468, -16.581685, 102.7, 6},
+    {28.058468, -16.581685, 102.7, 6},
+    {28.058449, -16.581738, 102.4, 6},
+    {28.058449, -16.581738, 102.4, 6},
+    {28.058449, -16.581738, 102.4, 6},
+    {28.058449, -16.581738, 102.4, 6},
+    {28.058430, -16.581790, 101.8, 6},
+    {28.058430, -16.581790, 101.8, 6},
+    {28.058430, -16.581790, 101.8, 6},
+    {28.058430, -16.581790, 101.8, 6},
+    {28.058411, -16.581843, 101.5, 6},
+    {28.058411, -16.581843, 101.5, 6},
+    {28.058411, -16.581843, 101.5, 6},
+    {28.058411, -16.581843, 101.5, 6},
+    {28.058393, -16.581895, 101.1, 6},
+    {28.058393, -16.581895, 101.1, 6},
+    {28.058393, -16.581895, 101.1, 6},
+    {28.058393, -16.581895, 101.1, 6},
+    {28.058375, -16.581947, 100.8, 6},
+    {28.058375, -16.581947, 100.8, 6},
+    {28.058375, -16.581947, 100.8, 6},
+    {28.058375, -16.581947, 100.8, 6},
+    {28.058358, -16.582000, 100.5, 6},
+    {28.058358, -16.582000, 100.5, 6},
+    {28.058358, -16.582000, 100.5, 6},
+    {28.058358, -16.582000, 100.5, 6},
+    {28.058339, -16.582052, 100.2, 6},
+    {28.058339, -16.582052, 100.2, 6},
+    {28.058339, -16.582052, 100.2, 6},
+    {28.058339, -16.582052, 100.2, 6},
+    {28.058321, -16.582104, 100.0, 6},
+    {28.058321, -16.582104, 100.0, 6},
+    {28.058321, -16.582104, 100.0, 6},
+    {28.058321, -16.582104, 100.0, 6},
+    {28.058304, -16.582157, 99.7, 6},
+    {28.058304, -16.582157, 99.7, 6},
+    {28.058304, -16.582157, 99.7, 6},
+    {28.058304, -16.582157, 99.7, 6},
+    {28.058286, -16.582209, 99.4, 6},
+    {28.058286, -16.582209, 99.4, 6},
+    {28.058286, -16.582209, 99.4, 6},
+    {28.058286, -16.582209, 99.4, 6},
+    {28.058269, -16.582261, 99.4, 6},
+    {28.058269, -16.582261, 99.4, 6},
+    {28.058269, -16.582261, 99.4, 6},
+    {28.058269, -16.582261, 99.4, 6},
+    {28.058252, -16.582314, 99.3, 6},
+    {28.058252, -16.582314, 99.3, 6},
+    {28.058252, -16.582314, 99.3, 6},
+    {28.058252, -16.582314, 99.3, 6},
+    {28.058235, -16.582367, 99.1, 6},
+    {28.058235, -16.582367, 99.1, 6},
+    {28.058235, -16.582367, 99.1, 6},
+    {28.058235, -16.582367, 99.1, 6},
+    {28.058219, -16.582421, 99.1, 6},
+    {28.058219, -16.582421, 99.1, 6},
+    {28.058219, -16.582421, 99.1, 6},
+    {28.058219, -16.582421, 99.1, 6},
+    {28.058204, -16.582475, 99.2, 6},
+    {28.058204, -16.582475, 99.2, 6},
+    {28.058204, -16.582475, 99.2, 6},
+    {28.058204, -16.582475, 99.2, 6},
+    {28.058187, -16.582527, 99.0, 6},
+    {28.058187, -16.582527, 99.0, 6},
+    {28.058187, -16.582527, 99.0, 6},
+    {28.058187, -16.582527, 99.0, 6},
+    {28.058170, -16.582579, 99.0, 6},
+    {28.058170, -16.582579, 99.0, 6},
+    {28.058170, -16.582579, 99.0, 6},
+    {28.058170, -16.582579, 99.0, 6},
+    {28.058153, -16.582631, 99.0, 6},
+    {28.058153, -16.582631, 99.0, 6},
+    {28.058153, -16.582631, 99.0, 6},
+    {28.058153, -16.582631, 99.0, 6},
+    {28.058136, -16.582684, 98.9, 6},
+    {28.058136, -16.582684, 98.9, 6},
+    {28.058136, -16.582684, 98.9, 6},
+    {28.058136, -16.582684, 98.9, 6},
+    {28.058119, -16.582736, 98.7, 6},
+    {28.058119, -16.582736, 98.7, 6},
+    {28.058119, -16.582736, 98.7, 6},
+    {28.058119, -16.582736, 98.7, 6},
+    {28.058102, -16.582788, 98.6, 6},
+    {28.058102, -16.582788, 98.6, 6},
+    {28.058102, -16.582788, 98.6, 6},
+    {28.058102, -16.582788, 98.6, 6},
+    {28.058085, -16.582840, 98.6, 6},
+    {28.058085, -16.582840, 98.6, 6},
+    {28.058085, -16.582840, 98.6, 6},
+    {28.058085, -16.582840, 98.6, 6},
+    {28.058067, -16.582892, 98.4, 6},
+    {28.058067, -16.582892, 98.4, 6},
+    {28.058067, -16.582892, 98.4, 6},
+    {28.058067, -16.582892, 98.4, 6},
+    {28.058050, -16.582944, 98.3, 6},
+    {28.058050, -16.582944, 98.3, 6},
+    {28.058050, -16.582944, 98.3, 6},
+    {28.058050, -16.582944, 98.3, 6},
+    {28.058032, -16.582996, 98.4, 6},
+    {28.058032, -16.582996, 98.4, 6},
+    {28.058032, -16.582996, 98.4, 6},
+    {28.058032, -16.582996, 98.4, 6},
+    {28.058015, -16.583047, 98.2, 6},
+    {28.058015, -16.583047, 98.2, 6},
+    {28.058015, -16.583047, 98.2, 6},
+    {28.058015, -16.583047, 98.2, 6},
+    {28.057997, -16.583099, 98.1, 6},
+    {28.057997, -16.583099, 98.1, 6},
+    {28.057997, -16.583099, 98.1, 6},
+    {28.057997, -16.583099, 98.1, 6},
+    {28.057979, -16.583150, 98.0, 6},
+    {28.057979, -16.583150, 98.0, 6},
+    {28.057979, -16.583150, 98.0, 6},
+    {28.057979, -16.583150, 98.0, 6},
+    {28.057962, -16.583202, 97.9, 6},
+    {28.057962, -16.583202, 97.9, 6},
+    {28.057962, -16.583202, 97.9, 6},
+    {28.057962, -16.583202, 97.9, 6},
+    {28.057945, -16.583254, 98.1, 6},
+    {28.057945, -16.583254, 98.1, 6},
+    {28.057945, -16.583254, 98.1, 6},
+    {28.057945, -16.583254, 98.1, 6},
+    {28.057927, -16.583306, 98.0, 6},
+    {28.057927, -16.583306, 98.0, 6},
+    {28.057927, -16.583306, 98.0, 6},
+    {28.057927, -16.583306, 98.0, 6},
+    {28.057910, -16.583358, 98.0, 6},
+    {28.057910, -16.583358, 98.0, 6},
+    {28.057910, -16.583358, 98.0, 6},
+    {28.057910, -16.583358, 98.0, 6},
+    {28.057892, -16.583410, 98.1, 6},
+    {28.057892, -16.583410, 98.1, 6},
+    {28.057892, -16.583410, 98.1, 6},
+    {28.057892, -16.583410, 98.1, 6},
+    {28.057875, -16.583462, 98.3, 6},
+    {28.057875, -16.583462, 98.3, 6},
+    {28.057875, -16.583462, 98.3, 6},
+    {28.057875, -16.583462, 98.3, 6},
 };
 
 static bool test_running = false;
 static int test_step = 0;
 static unsigned long test_last_update_ms = 0;
 
-uint8_t test(bool bp_status, const double test_coords[][2], const double test_speeds[])
+uint8_t test(bool bp_status, const double test_coords[][4])
 {
   if (test_running == false && bp_status == true)
   {
     test_last_update_ms = millis();
     test_running = true;
   }
-  else if (test_running == true && millis() - test_last_update_ms >= 1000)
+  else if (test_running == true && millis() - test_last_update_ms >= 500)
   {
     test_last_update_ms = millis();
-    updateRadarAlerts(test_coords[test_step][0], test_coords[test_step][1], test_speeds[test_step]);
+    updateRadarAlerts(test_coords[test_step][0], test_coords[test_step][1], test_coords[test_step][2]);
     test_step++;
-    if (test_step >= 8)
+    if (test_step >= 187)
     {
       test_step = 0;
       test_running = false;
@@ -667,29 +730,29 @@ void test_app()
   if (test_app_running == false)
     return;
 
-  switch (test_num)
+  /* switch (test_num)
   {
-  case 0:
-    showMessage("Test 0: enter radar zone", h / 2 - 10, ST77XX_WHITE, 1);
-    if (test(true, bp1_test_coords, bp1_test_speeds_kmh) == 0)
-      test_num++;
-    break;
-  case 1:
-    showMessage("Test 1: stay below limit", h / 2 - 10, ST77XX_WHITE, 1);
-    if (test(true, bp1_test_coords, bp2_test_speeds_kmh) == 0)
-      test_num++;
-    break;
-  case 2:
-    showMessage("Test 2: enter radar zone at max speed - 1", h / 2 - 10, ST77XX_WHITE, 1);
-    if (test(true, bp1_test_coords, bp3_test_speeds_kmh) == 0)
-      test_num++;
-    break;
-  default:
-    showMessage("Test complete", h / 2 - 10, ST77XX_WHITE, 1);
-    test_app_running = false;
-    test_num = 0;
-    break;
-  }
+  case 0: */
+  showMessage("Test 0: enter radar zone", h / 2 - 10, ST77XX_WHITE, 1);
+  if (test(true, bp1_test_coords) == 0)
+    test_num++;
+  /*  break;
+ case 1:
+   showMessage("Test 1: stay below limit", h / 2 - 10, ST77XX_WHITE, 1);
+   if (test(true, bp1_test_coords, bp2_test_speeds_kmh) == 0)
+     test_num++;
+   break;
+ case 2:
+   showMessage("Test 2: enter radar zone at max speed - 1", h / 2 - 10, ST77XX_WHITE, 1);
+   if (test(true, bp1_test_coords, bp3_test_speeds_kmh) == 0)
+     test_num++;
+   break;
+ default:
+   showMessage("Test complete", h / 2 - 10, ST77XX_WHITE, 1);
+   test_app_running = false;
+   test_num = 0;
+   break;
+ } */
 }
 
 void loop()
@@ -697,7 +760,7 @@ void loop()
 
   esp_task_wdt_reset();
 
-  // test_app();
+  test_app();
 
   // Handle button events set by ISRs (debounced in loop)
   if (button1Pressed)
@@ -739,53 +802,39 @@ void loop()
 
   // Manage radar beeps non-blocking (timed beeps)
   unsigned long now = millis();
-  // If we just entered a radar zone (transition), give a single immediate beep
-  if (radarJustEntered)
+
+  if (radarAlertActive)
   {
-    // single short entry beep (non-blocking via timer-driven startTone)
     if (!beepCurrentlyOn)
     {
-      startTone(2000);
-      beepCurrentlyOn = true;
-      beepOnUntil = now + 150; // 150ms entry beep
-      lastBeepTrigger = now;
-    }
-    radarJustEntered = false;
-  }
-  else
-  {
-    if (radarAlertActive)
-    {
-      if (!beepCurrentlyOn)
+      if (now - lastBeepTrigger >= radarDesiredIntervalMs)
       {
-        if (now - lastBeepTrigger >= radarDesiredIntervalMs)
-        {
-          startTone(radarDesiredFreqHz);
-          beepCurrentlyOn = true;
-          beepOnUntil = now + radarDesiredDurationMs;
-          lastBeepTrigger = now;
-        }
-      }
-      else
-      {
-        if (now >= beepOnUntil)
-        {
-          stopTone();
-          beepCurrentlyOn = false;
-        }
+        startTone(radarDesiredFreqHz);
+        beepCurrentlyOn = true;
+        beepOnUntil = now + radarDesiredDurationMs;
+        lastBeepTrigger = now;
       }
     }
     else
     {
-      if (beepCurrentlyOn)
+      if (now >= beepOnUntil)
       {
         stopTone();
         beepCurrentlyOn = false;
       }
-      // reset trigger so we don't immediately beep when alert appears
-      lastBeepTrigger = now;
     }
   }
+  else
+  {
+    if (beepCurrentlyOn)
+    {
+      stopTone();
+      beepCurrentlyOn = false;
+    }
+    // reset trigger so we don't immediately beep when alert appears
+    lastBeepTrigger = now;
+  }
+
   // Short delay for loop granularity (100ms) - keeps responsiveness for beeps
   delay(100);
 }
@@ -871,42 +920,4 @@ static void sendUbxCfgPrt115200()
   int tosend = idx;
   int written = uart_write_bytes(GPS_UART, (const char *)msg, tosend);
   Serial.printf("[GPS UBX] Sent CFG-PRT (change baud->115200) %d bytes, written=%d\n", tosend, written);
-}
-
-// --- Buzzer control functions ---
-// Start a square wave on the two pins with given frequency (Hz)
-static void startTone(uint32_t freqHz)
-{
-  if (freqHz == 0)
-    return;
-  uint32_t halfPeriodUs = 500000UL / freqHz; // half period in microseconds
-  if (!buzzerTimer)
-  {
-    // Use timer 0, prescaler 80 -> 1 tick = 1 microsecond
-    buzzerTimer = timerBegin(0, 80, true);
-    timerAttachInterrupt(buzzerTimer, &onBuzzerTimer, true);
-  }
-  timerAlarmWrite(buzzerTimer, halfPeriodUs, true);
-  timerAlarmEnable(buzzerTimer);
-}
-
-static void stopTone()
-{
-  if (buzzerTimer)
-  {
-    timerAlarmDisable(buzzerTimer);
-  }
-  gpio_set_level((gpio_num_t)BUZZER_PIN_A, 0);
-  gpio_set_level((gpio_num_t)BUZZER_PIN_B, 0);
-  buzzerState = false;
-}
-
-// Simple blocking beep helper (starts tone, waits, stops tone)
-static void beep(uint32_t freqHz, uint32_t durationMs)
-{
-  if (freqHz == 0 || durationMs == 0)
-    return;
-  startTone(freqHz);
-  delay(durationMs);
-  stopTone();
 }
