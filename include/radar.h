@@ -21,6 +21,7 @@ struct RadarAlertResult
     unsigned long intervalMs = 0;
     unsigned long durationMs = 0;
     uint32_t freqHz = 0;
+    double nearHaversine = 0.0;
 };
 
 class RadarAlertManager

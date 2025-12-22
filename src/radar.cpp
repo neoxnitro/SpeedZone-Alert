@@ -24,6 +24,13 @@ static const Radar radars[] = {
      60,
      28.065071387502737,
      -16.71600184039197},
+    // radar 3 (TF1 Costa Adeje )
+    {{28.090975582650643, 28.091038586405066, 28.098232144610954, 28.098211984764774},
+     {-16.729569218502817, -16.72934925545868, -16.730526265964112, -16.73072337570497},
+     4,
+     120,
+     28.096456290541294,
+     -16.730293673066765},
 };
 static const int RADAR_COUNT = sizeof(radars) / sizeof(radars[0]);
 
@@ -68,6 +75,9 @@ RadarAlertResult RadarAlertManager::update(double lat, double lng, double speedK
     {
         const Radar &r = radars[i];
         double d = haversineMeters(lat, lng, r.centroidLat, r.centroidLng);
+        if (res.nearHaversine == 0.0 || d < res.nearHaversine)
+            res.nearHaversine = d;
+
         if (d > 700.0)
             continue;
 
