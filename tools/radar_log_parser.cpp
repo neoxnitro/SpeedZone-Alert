@@ -52,10 +52,6 @@ int main(int argc, char **argv)
         std::cout << std::setprecision(1) << ", " << speed << " km/h, sats=" << sats;
         std::cout << " => inZone=" << (res.inZone ? "YES" : "NO");
         std::cout << " severity=" << res.severity;
-        if (res.justEntered)
-            std::cout << " [ENTER]";
-        if (res.justExited)
-            std::cout << " [EXIT]";
         if (res.inZone)
             std::cout << " interval=" << res.intervalMs << "ms dur=" << res.durationMs << "ms freq=" << res.freqHz << "Hz";
         std::cout << std::endl;
