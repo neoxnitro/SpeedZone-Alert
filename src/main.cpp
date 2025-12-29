@@ -65,6 +65,8 @@ typedef struct
   bool valid;
   char raw[128];
   int sats;
+  bool time_valid;
+  uint32_t epoch; // seconds since epoch (UTC)
 } GPSMsg;
 
 // --- Radar detection structures and helpers ---
@@ -97,6 +99,9 @@ static void gps_display_task(void *pvParameters);
 #include "driver_gps6mv2.h"
 // Buzzer driver
 #include "driver_buzzer.h"
+// Zone detection and storage
+#include "storage.h"
+#include "zone.h"
 
 // Button pins (change these to match your board wiring)
 // For TTGO boards you may need to adjust these pins to the actual buttons used.
@@ -232,6 +237,26 @@ static void uart_event_task(void *pvParameters)
         msg.speed_kmh = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
         // Satellite count (may be 0 if no fix)
         msg.sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+        // build epoch from GPS date/time if available
+        msg.time_valid = gps.time.isValid() && gps.date.isValid();
+        msg.epoch = 0;
+        if (msg.time_valid)
+        {
+          struct tm tm;
+          tm.tm_year = gps.date.year() - 1900;
+          tm.tm_mon = gps.date.month() - 1;
+          tm.tm_mday = gps.date.day();
+          tm.tm_hour = gps.time.hour();
+          tm.tm_min = gps.time.minute();
+          tm.tm_sec = gps.time.second();
+          tm.tm_isdst = 0;
+          // Treat GPS time as UTC
+          setenv("TZ", "UTC0", 1);
+          tzset();
+          time_t t = mktime(&tm);
+          if (t > 0)
+            msg.epoch = (uint32_t)t;
+        }
         xQueueSend(gpsQueue, &msg, 0);
         /*if (xQueueSend(gpsQueue, &msg, 0) != pdTRUE)
         {
@@ -306,6 +331,16 @@ static void gps_display_task(void *pvParameters)
 
       // Update radar alert logic (sets global desired beep interval/duration)
       updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh, msg.sats);
+      // Zone detection: record entry/exit using GPS epoch when available
+      char zoneEv = zone_process(msg.lat, msg.lng, msg.time_valid, msg.epoch);
+      if (zoneEv == 'E')
+      {
+        showMessage("Zone: ENTRY recorded", h - 36, ST77XX_GREEN, 1);
+      }
+      else if (zoneEv == 'X')
+      {
+        showMessage("Zone: EXIT recorded", h - 36, ST77XX_YELLOW, 1);
+      }
       // Yield briefly so the idle task on the other core can run and the watchdog
       // won't be starved by long display operations. Adjust the delay as needed.
       vTaskDelay(2);
@@ -449,6 +484,17 @@ void setup()
   // record boot time for screen management
   bootMillis = millis();
   screenIsOn = true;
+  // Initialize storage and zone (replace coordinates below with real zone)
+  if (!storage_init())
+  {
+    Serial.println("[main] storage_init failed");
+  }
+  static const double myZonePts[4][2] = {
+      {0.0, 0.0},
+      {0.0, 0.0},
+      {0.0, 0.0},
+      {0.0, 0.0}};
+  zone_init(myZonePts);
 }
 
 static const double bp1_test_coords[][4] = {
