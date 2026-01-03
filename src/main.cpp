@@ -72,6 +72,7 @@ typedef struct
 // --- Radar detection structures and helpers ---
 #include "radar.h"
 static RadarAlertManager radarManager;
+static RadarAlertResult lastRadarResult; // most recent radar evaluation
 
 // Radar alert state: set by display task, consumed by loop to produce timed beeps
 static volatile bool radarAlertActive = false;
@@ -131,11 +132,13 @@ void IRAM_ATTR button2ISR()
 // Determine radar alerts from current position + speed. Chooses highest-severity alert
 void updateRadarAlerts(double lat, double lng, double speedKmh, int sats = -1)
 {
-  Serial.printf("%.6f, %.6f, %.1f, %d\n", lat, lng, speedKmh, sats);
+  //   Serial.printf("%.6f, %.6f, %.1f, %d\n", lat, lng, speedKmh, sats);
   RadarAlertResult r = radarManager.update(lat, lng, speedKmh);
+  // Save last result for display code
+  lastRadarResult = r;
 
-  Serial.printf("  Radar alert: inZone=%d severity=%d intervalMs=%lu durationMs=%lu freqHz=%u nearHaversine=%.2f\n",
-                r.inZone ? 1 : 0, r.severity, r.intervalMs, r.durationMs, r.freqHz, r.nearHaversine);
+  // Serial.printf("  Radar alert: inZone=%d severity=%d intervalMs=%lu durationMs=%lu freqHz=%u nearHaversine=%.2f\n",
+  //   r.inZone ? 1 : 0, r.severity, r.intervalMs, r.durationMs, r.freqHz, r.nearHaversine);
 
   if (!r.inZone || r.severity == 0)
   {
@@ -191,6 +194,150 @@ void showMessage(const char *msg, int y, uint16_t color = ST77XX_WHITE, uint8_t 
   tft.setTextColor(color, ST77XX_BLACK);
   tft.setCursor(cx, y);
   tft.print(msg);
+}
+
+// Draw a circular speed gauge (like a car speedometer).
+// - speed: current speed in km/h
+// - cx,cy: center coordinates
+// - radius: outer radius of the gauge
+// Draws ticks at 20 km/h intervals and a needle. Erases previous gauge area.
+void showSpeedGauge(double speed, int cx, int cy, int radius, const RadarAlertResult &rr)
+{
+  const int maxSpeed = 140; // maximum displayed speed
+  // Clear gauge area
+  tft.fillCircle(cx, cy, radius + 2, ST77XX_BLACK);
+
+  // Draw outer circle
+  tft.drawCircle(cx, cy, radius, ST77XX_WHITE);
+
+  // Gauge arc from -135deg to +135deg (270deg span)
+  const double startA = -3.0 * M_PI / 4.0; // -135deg
+  const double span = 3.0 * M_PI / 2.0;    // 270deg
+
+  // Draw tick marks and labels every 20 km/h
+  for (int v = 0; v <= maxSpeed; v += 20)
+  {
+    double frac = (double)v / (double)maxSpeed;
+    double ang = startA + frac * span;
+    int xOuter = cx + (int)((radius)*cos(ang));
+    int yOuter = cy + (int)((radius)*sin(ang));
+    int xInner = cx + (int)((radius - 8) * cos(ang));
+    int yInner = cy + (int)((radius - 8) * sin(ang));
+    tft.drawLine(xInner, yInner, xOuter, yOuter, ST77XX_WHITE);
+
+    // labels a bit inside the inner tick
+    int xl = cx + (int)((radius - 16) * cos(ang));
+    int yl = cy + (int)((radius - 16) * sin(ang));
+    char lbl[8];
+    snprintf(lbl, sizeof(lbl), "%d", v);
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+    // rough center of text (offset manually)
+    tft.setCursor(xl - 6, yl - 4);
+    tft.print(lbl);
+  }
+
+  // Draw minor ticks (every 10 km/h)
+  for (int v = 0; v <= maxSpeed; v += 10)
+  {
+    if (v % 20 == 0)
+      continue; // already drawn
+    double frac = (double)v / (double)maxSpeed;
+    double ang = startA + frac * span;
+    int xOuter = cx + (int)((radius)*cos(ang));
+    int yOuter = cy + (int)((radius)*sin(ang));
+    int xInner = cx + (int)((radius - 5) * cos(ang));
+    int yInner = cy + (int)((radius - 5) * sin(ang));
+    tft.drawLine(xInner, yInner, xOuter, yOuter, ST77XX_WHITE);
+  }
+
+  // Determine color based on radar severity and inZone
+  uint16_t colorNeedle = ST77XX_GREEN;
+  bool blink = false;
+  if (rr.inZone)
+  {
+    switch (rr.severity)
+    {
+    case 0:
+      colorNeedle = ST77XX_GREEN;
+      break;
+    case 1:
+      colorNeedle = ST77XX_YELLOW; // orange-ish
+      break;
+    case 2:
+      colorNeedle = ST77XX_MAGENTA; // pink
+      break;
+    default:
+      colorNeedle = ST77XX_MAGENTA; // pink blinking for severity >=3
+      blink = true;
+      break;
+    }
+  }
+
+  // Draw needle (with blinking if required)
+  double s = speed;
+  if (s < 0)
+    s = 0;
+  if (s > maxSpeed)
+    s = maxSpeed;
+  double frac = s / (double)maxSpeed;
+  double nang = startA + frac * span;
+  int nx = cx + (int)((radius - 14) * cos(nang));
+  int ny = cy + (int)((radius - 14) * sin(nang));
+
+  bool doDraw = true;
+  if (blink)
+  {
+    unsigned long t = millis();
+    doDraw = ((t / 500) & 1) == 0; // toggle every 500ms
+  }
+
+  if (doDraw)
+  {
+    tft.drawLine(cx, cy, nx, ny, colorNeedle);
+  }
+  else
+  {
+    // if blinking off, draw needle in black to hide it
+    tft.drawLine(cx, cy, nx, ny, ST77XX_BLACK);
+  }
+
+  // center cap
+  tft.fillCircle(cx, cy, 4, ST77XX_WHITE);
+  tft.fillCircle(cx, cy, 3, ST77XX_BLACK);
+
+  // Draw numeric speed in center (color follows needle/blink)
+  char spbuf[16];
+  snprintf(spbuf, sizeof(spbuf), "%.0f km/h", speed);
+  tft.setTextSize(2);
+  if (doDraw)
+    tft.setTextColor(colorNeedle, ST77XX_BLACK);
+  else
+    tft.setTextColor(ST77XX_BLACK, ST77XX_BLACK);
+  int tx = cx - 28;
+  int ty = cy - 8;
+  tft.setCursor(tx, ty);
+  tft.print(spbuf);
+
+  // Show nearest radar distance below speed
+  char dbuf[32];
+  if (rr.nearHaversine > 0.0)
+  {
+    if (rr.nearHaversine >= 1000.0)
+      snprintf(dbuf, sizeof(dbuf), "%.1f km", rr.nearHaversine / 1000.0);
+    else
+      snprintf(dbuf, sizeof(dbuf), "%d m", (int)rr.nearHaversine);
+  }
+  else
+  {
+    snprintf(dbuf, sizeof(dbuf), "--");
+  }
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  tft.setCursor(cx - 24, cy + radius - 18);
+  tft.print("Nearest:");
+  tft.setCursor(cx - 24, cy + radius - 8);
+  tft.print(dbuf);
 }
 
 // UART event task: runs when UART driver posts an event (interrupt-driven)
@@ -327,20 +474,19 @@ static void gps_display_task(void *pvParameters)
         delay(100);
         beep(800, 500);
       }
+      /*
+            // Position
+            snprintf(linebuf, sizeof(linebuf), "Lat: %.6f", msg.lat);
+            showMessage(linebuf, 20, ST77XX_WHITE, 1);
+            snprintf(linebuf, sizeof(linebuf), "Lon: %.6f", msg.lng);
+            showMessage(linebuf, 36, ST77XX_WHITE, 1);
 
-      // Position
-      snprintf(linebuf, sizeof(linebuf), "Lat: %.6f", msg.lat);
-      showMessage(linebuf, 20, ST77XX_WHITE, 1);
-      snprintf(linebuf, sizeof(linebuf), "Lon: %.6f", msg.lng);
-      showMessage(linebuf, 36, ST77XX_WHITE, 1);
-
-      // Altitude in meters
-      snprintf(linebuf, sizeof(linebuf), "Alt: %.1f m", msg.alt);
-      showMessage(linebuf, 56, ST77XX_WHITE, 1);
-
-      // Speed in km/h
-      snprintf(linebuf, sizeof(linebuf), "Speed: %.1f km/h", msg.speed_kmh);
-      showMessage(linebuf, 76, ST77XX_WHITE, 1);
+            // Altitude in meters
+            snprintf(linebuf, sizeof(linebuf), "Alt: %.1f m", msg.alt);
+            showMessage(linebuf, 56, ST77XX_WHITE, 1);
+      */
+      // Speed in km/h - draw gauge on right side
+      showSpeedGauge(msg.speed_kmh, w - 60, h / 2, 48, lastRadarResult);
       // Debug raw transfer (bottom of screen)
       /*if (msg.raw[0] != '\0')
       {
@@ -348,13 +494,13 @@ static void gps_display_task(void *pvParameters)
       }*/
 
       // Show fix status + satellite count under speed
-      char status[64];
+      /* char status[64];
       snprintf(status, sizeof(status), "Fix: %s  Sats: %d", msg.valid ? "YES" : "NO", msg.sats);
       showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 1);
-
+      */
       // Yield briefly so the idle task on the other core can run and the watchdog
       // won't be starved by long display operations. Adjust the delay as needed.
-      vTaskDelay(2);
+      vTaskDelay(50 / portTICK_PERIOD_MS);
     }
   }
 }

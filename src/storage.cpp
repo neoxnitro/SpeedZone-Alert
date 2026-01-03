@@ -1,5 +1,5 @@
 #include "storage.h"
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <FS.h>
 #include <Arduino.h>
 
@@ -8,34 +8,106 @@ static const char *LAST_ENTRY_PATH = "/last_entry.txt";
 
 bool storage_init()
 {
-    if (!SPIFFS.begin(true))
+    if (!LittleFS.begin())
     {
-        Serial.println("[storage] SPIFFS mount failed");
-        return false;
+        Serial.println("[storage] LittleFS mount failed - attempting format (will erase FS)");
+        // Try to format the filesystem to recover from corruption
+        if (!LittleFS.format())
+        {
+            Serial.println("[storage] LittleFS format failed");
+            return false;
+        }
+        delay(100);
+        if (!LittleFS.begin())
+        {
+            Serial.println("[storage] LittleFS mount failed after format");
+            return false;
+        }
+        Serial.println("[storage] LittleFS formatted and mounted successfully");
     }
     // ensure file exists
-    if (!SPIFFS.exists(LOG_PATH))
+    if (!LittleFS.exists(LOG_PATH))
     {
-        File f = SPIFFS.open(LOG_PATH, FILE_WRITE);
+        File f = LittleFS.open(LOG_PATH, FILE_WRITE);
         if (f)
             f.close();
     }
     // ensure last-entry quick lookup file exists (store single epoch as text)
-    if (!SPIFFS.exists(LAST_ENTRY_PATH))
+    if (!LittleFS.exists(LAST_ENTRY_PATH))
     {
-        File f = SPIFFS.open(LAST_ENTRY_PATH, FILE_WRITE);
+        File f = LittleFS.open(LAST_ENTRY_PATH, FILE_WRITE);
         if (f)
         {
             f.print("0\n");
             f.close();
         }
     }
+
+    // If both files are empty (fresh littlefs), write a single default entry
+    bool logEmpty = true;
+    bool lastEmpty = true;
+    String lastEntryStr = "";
+    if (LittleFS.exists(LOG_PATH))
+    {
+        File f = LittleFS.open(LOG_PATH, FILE_READ);
+        if (f)
+        {
+            if (f.size() > 0)
+                logEmpty = false;
+            f.close();
+        }
+    }
+    if (LittleFS.exists(LAST_ENTRY_PATH))
+    {
+        File f = LittleFS.open(LAST_ENTRY_PATH, FILE_READ);
+        if (f)
+        {
+            if (f.size() > 0)
+            {
+                lastEntryStr = f.readStringUntil('\n');
+                lastEntryStr.trim();
+                // treat "0" as empty/default
+                if (lastEntryStr.length() == 0 || lastEntryStr == "0")
+                    lastEmpty = true;
+                else
+                    lastEmpty = false;
+            }
+            f.close();
+        }
+    }
+
+    Serial.printf("[storage] logEmpty=%d lastEntry='%s'\n", logEmpty ? 1 : 0, lastEntryStr.c_str());
+    /*
+        if (logEmpty && lastEmpty)
+        {
+            const uint32_t defaultEpoch = 1767459089UL;
+            File f = LittleFS.open(LOG_PATH, FILE_WRITE);
+            if (f)
+            {
+                char buf[64];
+                int n = snprintf(buf, sizeof(buf), "E,%u\n", (unsigned)defaultEpoch);
+                if (n > 0)
+                    f.write((const uint8_t *)buf, n);
+                f.close();
+            }
+            File f2 = LittleFS.open(LAST_ENTRY_PATH, FILE_WRITE);
+            if (f2)
+            {
+                char eb[32];
+                int en = snprintf(eb, sizeof(eb), "%u\n", (unsigned)defaultEpoch);
+                if (en > 0)
+                    f2.write((const uint8_t *)eb, en);
+                f2.close();
+            }
+            Serial.println("[storage] Wrote default entry to LittleFS");
+        }
+    */
     return true;
 }
 
 bool storage_append_event(char evType, uint32_t epoch)
 {
-    File f = SPIFFS.open(LOG_PATH, FILE_APPEND);
+    File f = LittleFS.open(LOG_PATH, FILE_APPEND);
     if (!f)
     {
         Serial.println("[storage] open append failed");
@@ -52,7 +124,7 @@ bool storage_append_event(char evType, uint32_t epoch)
         // to scan the full log when querying last entry epoch.
         if (evType == 'E')
         {
-            File f2 = SPIFFS.open(LAST_ENTRY_PATH, FILE_WRITE);
+            File f2 = LittleFS.open(LAST_ENTRY_PATH, FILE_WRITE);
             if (f2)
             {
                 char eb[32];
@@ -70,9 +142,9 @@ bool storage_append_event(char evType, uint32_t epoch)
 uint32_t storage_get_last_entry_epoch()
 {
     // Fast path: read small file that stores last entry epoch (written on append)
-    if (SPIFFS.exists(LAST_ENTRY_PATH))
+    if (LittleFS.exists(LAST_ENTRY_PATH))
     {
-        File f = SPIFFS.open(LAST_ENTRY_PATH, FILE_READ);
+        File f = LittleFS.open(LAST_ENTRY_PATH, FILE_READ);
         if (f)
         {
             String s = f.readStringUntil('\n');
@@ -102,14 +174,14 @@ void storage_print_file(const char *path)
     Serial.println(path);
     _print_border();
 
-    if (!SPIFFS.exists(path))
+    if (!LittleFS.exists(path))
     {
         Serial.println("| <missing>");
         _print_border();
         return;
     }
 
-    File f = SPIFFS.open(path, FILE_READ);
+    File f = LittleFS.open(path, FILE_READ);
     if (!f)
     {
         Serial.println("| <open failed>");
