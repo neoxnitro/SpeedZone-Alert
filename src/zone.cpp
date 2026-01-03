@@ -17,7 +17,6 @@ static double haversineMeters(double lat1, double lon1, double lat2, double lon2
 
 static double zone_pts[4][2];
 static uint32_t lastEntryEpoch = 0; // epoch of last recorded entry
-static int lastExitDay = -1;        // day-of-year of last exit to limit one exit per day
 
 // simple point-in-polygon for convex 4-point polygon using ray casting
 static bool point_in_poly(double lat, double lng)
@@ -66,12 +65,11 @@ char zone_process(double lat, double lng, bool timeValid, uint32_t epoch)
         }
     }
     // Exit
-    if (!inside && timeValid && epoch != 0 && lastEntryEpoch != 0 && (epoch - lastEntryEpoch) >= 3600)
+    if (!inside && timeValid && epoch != 0 && lastEntryEpoch != 0 && (epoch - lastEntryEpoch) >= 600)
     {
         if (storage_append_event('X', epoch))
         {
             lastEntryEpoch = 0;
-            storage_clear_last_entry_epoch();
             Serial.printf("[zone] Auto-exit recorded epoch=%u (clearing lastEntryEpoch)\n", (unsigned)epoch);
             return 'X';
         }

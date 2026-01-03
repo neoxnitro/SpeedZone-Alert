@@ -133,6 +133,10 @@ bool storage_append_event(char evType, uint32_t epoch)
                 f2.close();
             }
         }
+        else
+        {
+            storage_clear_last_entry_epoch();
+        }
         return written == (size_t)n;
     }
     f.close();
