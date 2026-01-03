@@ -16,11 +16,8 @@ static double haversineMeters(double lat1, double lon1, double lat2, double lon2
 }
 
 static double zone_pts[4][2];
-static bool inZone = false;
 static uint32_t lastEntryEpoch = 0; // epoch of last recorded entry
 static int lastExitDay = -1;        // day-of-year of last exit to limit one exit per day
-static bool pendingEntryNoTime = false;
-static bool pendingExitNoTime = false;
 
 // simple point-in-polygon for convex 4-point polygon using ray casting
 static bool point_in_poly(double lat, double lng)
@@ -45,18 +42,7 @@ void zone_init(const double pts[4][2])
         zone_pts[i][0] = pts[i][0];
         zone_pts[i][1] = pts[i][1];
     }
-    inZone = false;
     lastEntryEpoch = storage_get_last_entry_epoch();
-    pendingEntryNoTime = false;
-    pendingExitNoTime = false;
-}
-
-static int day_of_year_from_epoch(uint32_t epoch)
-{
-    time_t t = (time_t)epoch;
-    struct tm tm;
-    gmtime_r(&t, &tm);
-    return tm.tm_yday;
 }
 
 char zone_process(double lat, double lng, bool timeValid, uint32_t epoch)
@@ -68,124 +54,27 @@ char zone_process(double lat, double lng, bool timeValid, uint32_t epoch)
     {
         inside = point_in_poly(lat, lng);
     }
-    // Transition: outside -> inside => entry
-    if (inside && !inZone)
+
+    // Entry
+    if (inside && timeValid && epoch != 0 && lastEntryEpoch == 0)
     {
-        // entered polygon
-        if (timeValid && epoch != 0)
+        if (storage_append_event('E', epoch))
         {
-            // Suppress if last entry was < 1h ago
-            if (lastEntryEpoch == 0 || (epoch - lastEntryEpoch) >= 3600)
-            {
-                if (storage_append_event('E', epoch))
-                {
-                    lastEntryEpoch = epoch;
-                    inZone = true;
-                    pendingEntryNoTime = false;
-                    pendingExitNoTime = false;
-                    Serial.printf("[zone] Entry recorded epoch=%u\n", (unsigned)epoch);
-                    return 'E';
-                }
-            }
-            else
-            {
-                // suppressed due to <1h
-                inZone = true;
-                pendingEntryNoTime = false;
-                return 0;
-            }
-        }
-        else
-        {
-            // no valid time yet: mark pending and wait for time
-            pendingEntryNoTime = true;
-            inZone = true;
-            Serial.println("[zone] Entry detected but time invalid - pending");
-            return 0;
+            lastEntryEpoch = epoch;
+            Serial.printf("[zone] Entry recorded epoch=%u\n", (unsigned)epoch);
+            return 'E';
         }
     }
-
-    // Transition: inside -> outside => exit
-    if (!inside && inZone)
+    // Exit
+    if (!inside && timeValid && epoch != 0 && lastEntryEpoch != 0 && (epoch - lastEntryEpoch) >= 3600)
     {
-        if (timeValid && epoch != 0)
+        if (storage_append_event('X', epoch))
         {
-            // if lastEntryEpoch exists and less than 1h ago, suppress
-            if (lastEntryEpoch != 0 && (epoch - lastEntryEpoch) < 3600)
-            {
-                // suppress exit because entry was recent
-                inZone = false; // still update state though
-                pendingExitNoTime = false;
-                Serial.println("[zone] Exit suppressed (<1h since entry)");
-                return 0;
-            }
-
-            // Only one exit per day
-            int doy = day_of_year_from_epoch(epoch);
-            if (lastExitDay == doy)
-            {
-                inZone = false;
-                Serial.println("[zone] Exit suppressed (already recorded today)");
-                return 0;
-            }
-
-            if (storage_append_event('X', epoch))
-            {
-                lastExitDay = doy;
-                inZone = false;
-                pendingExitNoTime = false;
-                Serial.printf("[zone] Exit recorded epoch=%u\n", (unsigned)epoch);
-                return 'X';
-            }
-            return 0;
-        }
-        else
-        {
-            pendingExitNoTime = true;
-            inZone = false;
-            Serial.println("[zone] Exit detected but time invalid - pending");
-            return 0;
+            lastEntryEpoch = 0;
+            storage_clear_last_entry_epoch();
+            Serial.printf("[zone] Auto-exit recorded epoch=%u (clearing lastEntryEpoch)\n", (unsigned)epoch);
+            return 'X';
         }
     }
-
-    // If we have pending entry/no time and time is now valid, record it
-    if (pendingEntryNoTime && timeValid && epoch != 0)
-    {
-        if (lastEntryEpoch == 0 || (epoch - lastEntryEpoch) >= 3600)
-        {
-            if (storage_append_event('E', epoch))
-            {
-                lastEntryEpoch = epoch;
-                pendingEntryNoTime = false;
-                Serial.printf("[zone] Pending entry recorded epoch=%u\n", (unsigned)epoch);
-                return 'E';
-            }
-        }
-        else
-        {
-            pendingEntryNoTime = false;
-        }
-    }
-
-    // If we have pending exit/no time and time is now valid, record it
-    if (pendingExitNoTime && timeValid && epoch != 0)
-    {
-        int doy = day_of_year_from_epoch(epoch);
-        if (lastExitDay != doy)
-        {
-            if (storage_append_event('X', epoch))
-            {
-                lastExitDay = doy;
-                pendingExitNoTime = false;
-                Serial.printf("[zone] Pending exit recorded epoch=%u\n", (unsigned)epoch);
-                return 'X';
-            }
-        }
-        else
-        {
-            pendingExitNoTime = false;
-        }
-    }
-
-    return 0;
+    return '\0';
 }

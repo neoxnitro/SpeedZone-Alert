@@ -159,6 +159,16 @@ uint32_t storage_get_last_entry_epoch()
     return 0;
 }
 
+void storage_clear_last_entry_epoch()
+{
+    File f = LittleFS.open(LAST_ENTRY_PATH, FILE_WRITE);
+    if (f)
+    {
+        f.print("0\n");
+        f.close();
+    }
+}
+
 // Print a simple dashed border
 static void _print_border()
 {
