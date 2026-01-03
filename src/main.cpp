@@ -203,19 +203,18 @@ void showMessage(const char *msg, int y, uint16_t color = ST77XX_WHITE, uint8_t 
 // Draws ticks at 20 km/h intervals and a needle. Erases previous gauge area.
 void showSpeedGauge(double speed, int cx, int cy, int radius, const RadarAlertResult &rr)
 {
-  // Simplified display: only draw the numeric speed at the same location
-  // Clear the square area where speed is shown to avoid artifacts
-  int wbox = radius * 2;
-  int hbox = radius * 2;
-  tft.fillRect(cx - radius, cy - radius, wbox, hbox, ST77XX_BLACK);
+  // Only redraw when value/color/blink state changes to avoid flicker
+  static double prevSpeed = -1.0;
+  static uint16_t prevColor = 0xffff;
+  static bool prevDrawOn = true;
 
   // Determine color and blink behavior based on severity
-  uint16_t color = ST77XX_GREEN;
+  uint16_t color = ST77XX_WHITE;
   bool blink = false;
   if (rr.inZone)
   {
     if (rr.severity <= 0)
-      color = ST77XX_GREEN;
+      color = ST77XX_WHITE;
     else if (rr.severity == 1)
       color = ST77XX_YELLOW;
     else if (rr.severity == 2)
@@ -238,20 +237,121 @@ void showSpeedGauge(double speed, int cx, int cy, int radius, const RadarAlertRe
   char spbuf[16];
   snprintf(spbuf, sizeof(spbuf), "%.0f km/h", speed);
 
-  tft.setTextSize(3);
-  if (drawOn)
-    tft.setTextColor(color, ST77XX_BLACK);
-  else
-    tft.setTextColor(ST77XX_BLACK, ST77XX_BLACK);
+  // Prepare distance string (in meters or km)
+  char dbuf[24];
+  double d = rr.nearHaversine; // meters
+  int distColor = ST77XX_WHITE;
+  if (d > 0.0)
+  {
+    if (d >= 1000.0)
+      snprintf(dbuf, sizeof(dbuf), "%.1f km", d / 1000.0);
+    else
+      snprintf(dbuf, sizeof(dbuf), "%d m", (int)d);
 
-  // Center the text roughly
-  int16_t x1, y1;
-  uint16_t bw, bh;
-  tft.getTextBounds(spbuf, cx - 20, cy - 12, &x1, &y1, &bw, &bh);
-  int tx = cx - (bw / 2);
-  int ty = cy - (bh / 2);
-  tft.setCursor(tx, ty);
+    // color rules: >=800 green, <800 orange (yellow), <=200 magenta
+    if (d <= 200.0)
+      distColor = ST77XX_MAGENTA;
+    else if (d < 800.0)
+      distColor = ST77XX_YELLOW;
+    else
+      distColor = ST77XX_GREEN;
+  }
+  else
+  {
+    snprintf(dbuf, sizeof(dbuf), "--");
+    distColor = ST77XX_WHITE;
+  }
+
+  // Compute text bounds for speed and distance so we only clear and redraw that area
+  tft.setTextSize(3);
+  int16_t sbx, sby;
+  uint16_t sbw, sbh;
+  tft.getTextBounds(spbuf, cx - 20, cy - 12, &sbx, &sby, &sbw, &sbh);
+  int stx = cx - (sbw / 2);
+  int sty = cy - (sbh / 2);
+
+  // Make distance larger and center it under the speed
+  tft.setTextSize(2);
+  int16_t dbx, dby;
+  uint16_t dbw, dbh;
+  tft.getTextBounds(dbuf, cx - 20, cy + sbh / 2 + 4, &dbx, &dby, &dbw, &dbh);
+  int dtx = cx - (dbw / 2);
+  // place distance just below speed bounding box with a small gap
+  int dty = sty + sbh + 4;
+
+  // Combined bounding box
+  int boxX = min(stx, dtx);
+  int boxY = min(sty, dty);
+  int boxW = max(stx + (int)sbw, dtx + (int)dbw) - boxX;
+  int boxH = max(sty + (int)sbh, dty + (int)dbh) - boxY;
+
+  // Determine if redraw needed
+  static int prevDistInt = -999999;
+  static uint16_t prevDistColor = 0xffff;
+  bool needRedraw = false;
+  if (fabs(prevSpeed - speed) > 0.5)
+    needRedraw = true;
+  if (prevColor != color)
+    needRedraw = true;
+  if (prevDrawOn != drawOn)
+    needRedraw = true;
+  int curDistInt = (int)round(d);
+  if (curDistInt != prevDistInt)
+    needRedraw = true;
+  if (prevDistColor != distColor)
+    needRedraw = true;
+
+  if (!needRedraw)
+    return;
+
+  // Clip box to avoid touching rightmost pixel column (preserve border)
+  int screenW = tft.width();
+  int maxX = screenW - 2; // avoid last column index
+  int drawX = boxX;
+  int drawW = boxW;
+  if (drawX < 0)
+  {
+    drawW += drawX;
+    drawX = 0;
+  }
+  if (drawX + drawW > maxX)
+    drawW = maxX - drawX;
+  if (drawW > 0 && boxY >= 0)
+    tft.fillRect(drawX, boxY, drawW, boxH, ST77XX_BLACK);
+
+  // Draw speed (may blink)
+  if (drawOn)
+    tft.setTextSize(3), tft.setTextColor(color, ST77XX_BLACK);
+  else
+    tft.setTextSize(3), tft.setTextColor(ST77XX_BLACK, ST77XX_BLACK);
+  int printStx = stx;
+  if (printStx < 0)
+    printStx = 0;
+  if (printStx > maxX)
+    printStx = maxX - 1;
+  tft.setCursor(printStx, sty);
   tft.print(spbuf);
+
+  // Draw distance (always visible, no blink) — use same text size as measured
+  tft.setTextSize(2);
+  tft.setTextColor(distColor, ST77XX_BLACK);
+  // Center distance under the actually printed speed text
+  int centerX = printStx + ((int)sbw / 2);
+  int printDtx = centerX - ((int)dbw / 2);
+  if (printDtx < 0)
+    printDtx = 0;
+  if (printDtx + (int)dbw > maxX)
+    printDtx = maxX - (int)dbw;
+  if (printDtx < 0)
+    printDtx = 0;
+  tft.setCursor(printDtx, dty);
+  tft.print(dbuf);
+
+  prevSpeed = speed;
+  prevColor = color;
+  prevDrawOn = drawOn;
+  prevDistInt = curDistInt;
+  prevDistColor = distColor;
 }
 
 // UART event task: runs when UART driver posts an event (interrupt-driven)
