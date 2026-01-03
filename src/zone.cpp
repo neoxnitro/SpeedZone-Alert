@@ -3,6 +3,18 @@
 #include <Arduino.h>
 #include <time.h>
 
+// Haversine distance in meters (local copy to avoid cross-file dependency)
+static double haversineMeters(double lat1, double lon1, double lat2, double lon2)
+{
+    const double R = 6371000.0; // earth radius meters
+    const double PI_VAL = 3.14159265358979323846;
+    double dLat = (lat2 - lat1) * PI_VAL / 180.0;
+    double dLon = (lon2 - lon1) * PI_VAL / 180.0;
+    double a = sin(dLat / 2) * sin(dLat / 2) + cos(lat1 * PI_VAL / 180.0) * cos(lat2 * PI_VAL / 180.0) * sin(dLon / 2) * sin(dLon / 2);
+    double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    return R * c;
+}
+
 static double zone_pts[4][2];
 static bool inZone = false;
 static uint32_t lastEntryEpoch = 0; // epoch of last recorded entry
@@ -49,7 +61,13 @@ static int day_of_year_from_epoch(uint32_t epoch)
 
 char zone_process(double lat, double lng, bool timeValid, uint32_t epoch)
 {
-    bool inside = point_in_poly(lat, lng);
+    // First check distance to first zone point to avoid expensive polygon test
+    double d0 = haversineMeters(lat, lng, zone_pts[0][0], zone_pts[0][1]);
+    bool inside = false;
+    if (d0 <= 200.0)
+    {
+        inside = point_in_poly(lat, lng);
+    }
     // Transition: outside -> inside => entry
     if (inside && !inZone)
     {

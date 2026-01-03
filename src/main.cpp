@@ -129,7 +129,7 @@ void IRAM_ATTR button2ISR()
 }
 
 // Determine radar alerts from current position + speed. Chooses highest-severity alert
-static void updateRadarAlerts(double lat, double lng, double speedKmh, int sats = -1)
+void updateRadarAlerts(double lat, double lng, double speedKmh, int sats = -1)
 {
   Serial.printf("%.6f, %.6f, %.1f, %d\n", lat, lng, speedKmh, sats);
   RadarAlertResult r = radarManager.update(lat, lng, speedKmh);
@@ -156,6 +156,10 @@ static void updateRadarAlerts(double lat, double lng, double speedKmh, int sats 
   radarDesiredDurationMs = r.durationMs;
   radarDesiredFreqHz = r.freqHz;
 }
+
+#ifdef ENABLE_TESTS
+#include "tests.h"
+#endif
 
 // Helper to draw messages using Adafruit GFX (replaces TFT_eSPI showMessage)
 void showMessage(const char *msg, int y, uint16_t color = ST77XX_WHITE, uint8_t size = 2)
@@ -305,6 +309,25 @@ static void gps_display_task(void *pvParameters)
         continue;
       }
 
+      // Update radar alert logic (sets global desired beep interval/duration)
+      updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh, msg.sats);
+      // Zone detection: record entry/exit using GPS epoch when available
+      char zoneEv = zone_process(msg.lat, msg.lng, msg.time_valid, msg.epoch);
+      if (zoneEv == 'E')
+      {
+        showMessage("Zone: ENTRY recorded", h - 36, ST77XX_GREEN, 1);
+        beep(1500, 500);
+        delay(100);
+        beep(1500, 500);
+      }
+      else if (zoneEv == 'X')
+      {
+        showMessage("Zone: EXIT recorded", h - 36, ST77XX_YELLOW, 1);
+        beep(800, 500);
+        delay(100);
+        beep(800, 500);
+      }
+
       // Position
       snprintf(linebuf, sizeof(linebuf), "Lat: %.6f", msg.lat);
       showMessage(linebuf, 20, ST77XX_WHITE, 1);
@@ -329,18 +352,6 @@ static void gps_display_task(void *pvParameters)
       snprintf(status, sizeof(status), "Fix: %s  Sats: %d", msg.valid ? "YES" : "NO", msg.sats);
       showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 1);
 
-      // Update radar alert logic (sets global desired beep interval/duration)
-      updateRadarAlerts(msg.lat, msg.lng, msg.speed_kmh, msg.sats);
-      // Zone detection: record entry/exit using GPS epoch when available
-      char zoneEv = zone_process(msg.lat, msg.lng, msg.time_valid, msg.epoch);
-      if (zoneEv == 'E')
-      {
-        showMessage("Zone: ENTRY recorded", h - 36, ST77XX_GREEN, 1);
-      }
-      else if (zoneEv == 'X')
-      {
-        showMessage("Zone: EXIT recorded", h - 36, ST77XX_YELLOW, 1);
-      }
       // Yield briefly so the idle task on the other core can run and the watchdog
       // won't be starved by long display operations. Adjust the delay as needed.
       vTaskDelay(2);
@@ -422,6 +433,8 @@ void setup()
   buzzerInit(BUZZER_PIN_A, BUZZER_PIN_B);
   // Optional quick test beep (uncomment to hear a short tone on boot)
   beep(2000, 150);
+  delay(150);
+  beep(2000, 150);
   // --- Initialize UART1 for GPS (interrupt-driven) ---
   {
     uart_config_t uart_config = {
@@ -470,10 +483,12 @@ void setup()
 
     // create a task to handle UART events (runs when data arrives)
     // pin the UART event task to CPU 0 so it won't interfere with Arduino `loop()` on CPU 1
+    Serial.println("Create uart_event_task pinned to CPU 0");
     xTaskCreatePinnedToCore(uart_event_task, "uart_event_task", 4096, NULL, 12, &uartTaskHandle, 0);
     // create a task to display GPS data (blocks on gpsQueue)
     // pin the display task to CPU 0 or 1 depending on your responsiveness needs.
     // Here we pin the display to CPU 0 to keep long display operations off the Arduino core (CPU 1)
+    Serial.println("Create gps_display_task pinned to CPU 0");
     xTaskCreatePinnedToCore(gps_display_task, "gps_display_task", 8192, NULL, 1, &displayTaskHandle, 0);
   }
   // --- End migrated logic from main2 setup ---
@@ -485,274 +500,37 @@ void setup()
   bootMillis = millis();
   screenIsOn = true;
   // Initialize storage and zone (replace coordinates below with real zone)
+  Serial.println("Initialize storage and zone...");
   if (!storage_init())
   {
     Serial.println("[main] storage_init failed");
   }
+  else
+  {
+    storage_dump_state();
+  }
+  Serial.println("Storage initialized.");
   static const double myZonePts[4][2] = {
-      {0.0, 0.0},
-      {0.0, 0.0},
-      {0.0, 0.0},
-      {0.0, 0.0}};
+      {28.04882958455011, -16.578792877407757},
+      {28.047733153660843, -16.57824154225997},
+      {28.048874998606195, -16.57490412683203},
+      {28.049913028944573, -16.575639240362413}};
+  Serial.println("Initialize zone points...");
   zone_init(myZonePts);
+  Serial.println("Zone initialized.");
 }
 
-static const double bp1_test_coords[][4] = {
-    {28.070792, -16.705132, 61.9, 6},
-    {28.070792, -16.705132, 61.9, 6},
-    {28.070792, -16.705132, 61.9, 6},
-    {28.070792, -16.705132, 61.9, 6},
-    {28.070792, -16.705096, 61.9, 6},
-    {28.070792, -16.705096, 61.9, 6},
-    {28.070792, -16.705096, 61.9, 6},
-    {28.070792, -16.705096, 61.9, 6},
-    {28.070791, -16.705061, 61.5, 6},
-    {28.070791, -16.705061, 61.5, 6},
-    {28.070791, -16.705061, 61.5, 6},
-    {28.070791, -16.705061, 61.5, 6},
-    {28.070790, -16.705026, 61.7, 6},
-    {28.070790, -16.705026, 61.7, 6},
-    {28.070790, -16.705026, 61.7, 6},
-    {28.070790, -16.705026, 61.7, 6},
-    {28.070790, -16.705026, 61.7, 6},
-    {28.070789, -16.704991, 61.4, 6},
-    {28.070789, -16.704991, 61.4, 6},
-    {28.070789, -16.704991, 61.4, 6},
-    {28.070789, -16.704991, 61.4, 6},
-    {28.070788, -16.704957, 61.1, 6},
-    {28.070788, -16.704957, 61.1, 6},
-    {28.070788, -16.704957, 61.1, 6},
-    {28.070788, -16.704957, 61.1, 6},
-    {28.070788, -16.704957, 61.1, 6},
-    {28.070787, -16.704923, 60.7, 6},
-    {28.070787, -16.704923, 60.7, 6},
-    {28.070787, -16.704923, 60.7, 6},
-    {28.070787, -16.704923, 60.7, 6},
-    {28.070784, -16.704889, 60.4, 6},
-    {28.070784, -16.704889, 60.4, 6},
-    {28.070784, -16.704889, 60.4, 6},
-    {28.070784, -16.704889, 60.4, 6},
-    {28.070784, -16.704889, 60.4, 6},
-    {28.070781, -16.704855, 60.2, 6},
-    {28.070781, -16.704855, 60.2, 6},
-    {28.070781, -16.704855, 60.2, 6},
-    {28.070781, -16.704855, 60.2, 6},
-    {28.070778, -16.704821, 59.9, 6},
-    {28.070778, -16.704821, 59.9, 6},
-    {28.070778, -16.704821, 59.9, 6},
-    {28.070778, -16.704821, 59.9, 6},
-    {28.070774, -16.704787, 59.8, 6},
-    {28.070774, -16.704787, 59.8, 6},
-    {28.070774, -16.704787, 59.8, 6},
-    {28.070774, -16.704787, 59.8, 6},
-    {28.070774, -16.704787, 59.8, 6},
-    {28.070771, -16.704754, 59.3, 6},
-    {28.070771, -16.704754, 59.3, 6},
-    {28.070771, -16.704754, 59.3, 6},
-    {28.070771, -16.704754, 59.3, 6},
-    {28.070767, -16.704721, 59.2, 6},
-    {28.070767, -16.704721, 59.2, 6},
-    {28.070767, -16.704721, 59.2, 6},
-    {28.070767, -16.704721, 59.2, 6},
-    {28.070767, -16.704721, 59.2, 6},
-    {28.070763, -16.704688, 58.8, 6},
-    {28.070763, -16.704688, 58.8, 6},
-    {28.070763, -16.704688, 58.8, 6},
-    {28.070763, -16.704688, 58.8, 6},
-    {28.070759, -16.704655, 58.4, 6},
-    {28.070759, -16.704655, 58.4, 6},
-    {28.070759, -16.704655, 58.4, 6},
-    {28.070759, -16.704655, 58.4, 6},
-    {28.070759, -16.704655, 58.4, 6},
-    {28.070754, -16.704622, 58.4, 6},
-    {28.070754, -16.704622, 58.4, 6},
-    {28.070754, -16.704622, 58.4, 6},
-    {28.070754, -16.704622, 58.4, 6},
-    {28.070750, -16.704589, 58.0, 6},
-    {28.070750, -16.704589, 58.0, 6},
-    {28.070750, -16.704589, 58.0, 6},
-    {28.070750, -16.704589, 58.0, 6},
-    {28.070750, -16.704589, 58.0, 6},
-    {28.070745, -16.704556, 58.1, 6},
-    {28.070745, -16.704556, 58.1, 6},
-    {28.070745, -16.704556, 58.1, 6},
-    {28.070745, -16.704556, 58.1, 6},
-    {28.070740, -16.704524, 57.9, 6},
-    {28.070740, -16.704524, 57.9, 5},
-    {28.070740, -16.704524, 57.9, 5},
-    {28.070740, -16.704524, 57.9, 5},
-    {28.070735, -16.704492, 58.1, 5},
-    {28.070735, -16.704492, 58.1, 5},
-    {28.070735, -16.704492, 58.1, 5},
-    {28.070735, -16.704492, 58.1, 5},
-    {28.070735, -16.704492, 58.1, 5},
-    {28.070729, -16.704459, 58.5, 5},
-    {28.070729, -16.704459, 58.5, 6},
-    {28.070729, -16.704459, 58.5, 6},
-    {28.070729, -16.704459, 58.5, 6},
-    {28.070723, -16.704426, 58.5, 6},
-    {28.070723, -16.704426, 58.5, 6},
-    {28.070723, -16.704426, 58.5, 6},
-    {28.070723, -16.704426, 58.5, 6},
-    {28.070723, -16.704426, 58.5, 6},
-    {28.070717, -16.704394, 58.2, 6},
-    {28.070717, -16.704394, 58.2, 6},
-    {28.070717, -16.704394, 58.2, 6},
-    {28.070717, -16.704394, 58.2, 6},
-    {28.070711, -16.704362, 58.0, 6},
-    {28.070711, -16.704362, 58.0, 6},
-    {28.070711, -16.704362, 58.0, 6},
-    {28.070711, -16.704362, 58.0, 6},
-    {28.070711, -16.704362, 58.0, 6},
-    {28.070704, -16.704329, 58.5, 6},
-    {28.070704, -16.704329, 58.5, 6},
-    {28.070704, -16.704329, 58.5, 6},
-    {28.070704, -16.704329, 58.5, 6},
-    {28.070698, -16.704297, 58.6, 6},
-    {28.070698, -16.704297, 58.6, 6},
-    {28.070698, -16.704297, 58.6, 6},
-    {28.070698, -16.704297, 58.6, 6},
-    {28.070692, -16.704265, 58.3, 6},
-    {28.070692, -16.704265, 58.3, 6},
-    {28.070692, -16.704265, 58.3, 6},
-    {28.070692, -16.704265, 58.3, 6},
-    {28.070692, -16.704265, 58.3, 6},
-    {28.070685, -16.704232, 58.6, 6},
-    {28.070685, -16.704232, 58.6, 6},
-    {28.070685, -16.704232, 58.6, 6},
-    {28.070685, -16.704232, 58.6, 6},
-    {28.070678, -16.704200, 58.3, 6},
-    {28.070678, -16.704200, 58.3, 6},
-    {28.070678, -16.704200, 58.3, 6},
-    {28.070678, -16.704200, 58.3, 6},
-    {28.070678, -16.704200, 58.3, 6},
-    {28.070672, -16.704168, 58.6, 6},
-    {28.070672, -16.704168, 58.6, 6},
-    {28.070672, -16.704168, 58.6, 6},
-    {28.070672, -16.704168, 58.6, 6},
-    {28.070665, -16.704135, 58.9, 6},
-    {28.070665, -16.704135, 58.9, 6},
-    {28.070665, -16.704135, 58.9, 6},
-    {28.070665, -16.704135, 58.9, 6},
-    {28.070665, -16.704135, 58.9, 6},
-    {28.070658, -16.704102, 59.0, 6},
-    {28.070658, -16.704102, 59.0, 6},
-    {28.070658, -16.704102, 59.0, 6},
-    {28.070658, -16.704102, 59.0, 6},
-    {28.070652, -16.704069, 58.9, 6},
-    {28.070652, -16.704069, 58.9, 6},
-    {28.070652, -16.704069, 58.9, 6},
-    {28.070652, -16.704069, 58.9, 6},
-    {28.070652, -16.704069, 58.9, 6},
-    {28.070645, -16.704036, 59.3, 6},
-    {28.070645, -16.704036, 59.3, 6},
-    {28.070645, -16.704036, 59.3, 6},
-    {28.070645, -16.704036, 59.3, 6},
-    {28.070638, -16.704003, 59.6, 6},
-    {28.070638, -16.704003, 59.6, 6},
-    {28.070638, -16.704003, 59.6, 6},
-    {28.070638, -16.704003, 59.6, 6},
-    {28.070631, -16.703970, 65.8, 6},
-    {28.070631, -16.703970, 65.8, 6},
-    {28.070631, -16.703970, 65.8, 6},
-    {28.070631, -16.703970, 65.8, 6},
-    {28.070631, -16.703970, 65.8, 6},
-    {28.070624, -16.703937, 65.1, 6},
-    {28.070624, -16.703937, 70.1, 6},
-    {28.070624, -16.703937, 70.1, 6},
-    {28.070624, -16.703937, 70.1, 6},
-    {28.070617, -16.703903, 70.4, 6},
-    {28.070617, -16.703903, 60.4, 6},
-    {28.070617, -16.703903, 60.4, 6},
-    {28.070617, -16.703903, 60.4, 6},
-    {28.070617, -16.703903, 60.4, 6},
-    {28.070611, -16.703870, 60.3, 6},
-    {28.070611, -16.703870, 60.3, 6},
-    {28.070611, -16.703870, 60.3, 6},
-    {28.070611, -16.703870, 60.3, 6},
-    {28.070604, -16.703837, 60.4, 6},
-    {28.070604, -16.703837, 60.4, 6},
-    {28.070604, -16.703837, 60.4, 6},
-    {28.070604, -16.703837, 60.4, 6},
-    {28.070597, -16.703803, 60.8, 6},
-    {28.070597, -16.703803, 60.8, 6},
-    {28.070597, -16.703803, 60.8, 6},
-    {28.070597, -16.703803, 60.8, 6},
-    {28.070597, -16.703803, 60.8, 6},
-    {28.070591, -16.703770, 60.7, 6},
-    {28.070591, -16.703770, 60.7, 6},
-    {28.070591, -16.703770, 60.7, 6},
-};
-
-static bool test_running = false;
-static int test_step = 0;
-static unsigned long test_last_update_ms = 0;
-
-uint8_t test(bool bp_status, const double test_coords[][4])
-{
-  if (test_running == false && bp_status == true)
-  {
-    test_last_update_ms = millis();
-    test_running = true;
-  }
-  else if (test_running == true && millis() - test_last_update_ms >= 500)
-  {
-    test_last_update_ms = millis();
-    updateRadarAlerts(test_coords[test_step][0], test_coords[test_step][1], test_coords[test_step][2], test_coords[test_step][3]);
-    test_step++;
-    if (test_step >= 187)
-    {
-      test_step = 0;
-      test_running = false;
-      return 0;
-    }
-    char tmp[32];
-    snprintf(tmp, sizeof(tmp), "test step: %d", test_step);
-    showMessage(tmp, h / 2 - 14, ST77XX_WHITE, 1);
-  }
-  return 1;
-}
-
-static bool test_app_running = false;
-
-void test_app()
-{
-  static uint8_t test_num = 0;
-
-  if (test_app_running == false)
-    return;
-
-  /* switch (test_num)
-  {
-  case 0: */
-  showMessage("Test 0: enter radar zone", h / 2 - 10, ST77XX_WHITE, 1);
-  if (test(true, bp1_test_coords) == 0)
-    test_num++;
-  /*  break;
- case 1:
-   showMessage("Test 1: stay below limit", h / 2 - 10, ST77XX_WHITE, 1);
-   if (test(true, bp1_test_coords, bp2_test_speeds_kmh) == 0)
-     test_num++;
-   break;
- case 2:
-   showMessage("Test 2: enter radar zone at max speed - 1", h / 2 - 10, ST77XX_WHITE, 1);
-   if (test(true, bp1_test_coords, bp3_test_speeds_kmh) == 0)
-     test_num++;
-   break;
- default:
-   showMessage("Test complete", h / 2 - 10, ST77XX_WHITE, 1);
-   test_app_running = false;
-   test_num = 0;
-   break;
- } */
-}
+// Test code moved to src/tests.cpp and enabled with #define ENABLE_TESTS
 
 void loop()
 {
 
   esp_task_wdt_reset();
 
-  // test_app();
+  // Call test loop when enabled
+#ifdef ENABLE_TESTS
+  test_app();
+#endif
 
   // Handle button events set by ISRs (debounced in loop)
   if (button1Pressed)
@@ -765,7 +543,9 @@ void loop()
       // clear flag early
       button1Pressed = false;
       // xx
-      test_app_running = true;
+#ifdef ENABLE_TESTS
+      test_start();
+#endif
     }
     else
     {
@@ -784,7 +564,9 @@ void loop()
       // yy
       showMessage("Button2: wake 1m", h / 2 - 10, ST77XX_WHITE, 1);
 
-      test_app_running = false;
+#ifdef ENABLE_TESTS
+      test_stop();
+#endif
     }
     else
     {

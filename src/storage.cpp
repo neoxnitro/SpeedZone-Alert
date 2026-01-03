@@ -4,6 +4,7 @@
 #include <Arduino.h>
 
 static const char *LOG_PATH = "/zone_log.csv";
+static const char *LAST_ENTRY_PATH = "/last_entry.txt";
 
 bool storage_init()
 {
@@ -18,6 +19,16 @@ bool storage_init()
         File f = SPIFFS.open(LOG_PATH, FILE_WRITE);
         if (f)
             f.close();
+    }
+    // ensure last-entry quick lookup file exists (store single epoch as text)
+    if (!SPIFFS.exists(LAST_ENTRY_PATH))
+    {
+        File f = SPIFFS.open(LAST_ENTRY_PATH, FILE_WRITE);
+        if (f)
+        {
+            f.print("0\n");
+            f.close();
+        }
     }
     return true;
 }
@@ -37,6 +48,19 @@ bool storage_append_event(char evType, uint32_t epoch)
     {
         size_t written = f.write((const uint8_t *)buf, n);
         f.close();
+        // If this is an entry event, update the quick lookup file so we don't need
+        // to scan the full log when querying last entry epoch.
+        if (evType == 'E')
+        {
+            File f2 = SPIFFS.open(LAST_ENTRY_PATH, FILE_WRITE);
+            if (f2)
+            {
+                char eb[32];
+                int en = snprintf(eb, sizeof(eb), "%u\n", (unsigned)epoch);
+                f2.write((const uint8_t *)eb, en);
+                f2.close();
+            }
+        }
         return written == (size_t)n;
     }
     f.close();
@@ -45,56 +69,67 @@ bool storage_append_event(char evType, uint32_t epoch)
 
 uint32_t storage_get_last_entry_epoch()
 {
-    if (!SPIFFS.exists(LOG_PATH))
-        return 0;
-    File f = SPIFFS.open(LOG_PATH, FILE_READ);
-    if (!f)
-        return 0;
-    // Read file backwards to find last line starting with 'E,'
-    int64_t pos = f.size() - 1;
-    String line = "";
-    while (pos >= 0)
+    // Fast path: read small file that stores last entry epoch (written on append)
+    if (SPIFFS.exists(LAST_ENTRY_PATH))
     {
-        f.seek(pos);
-        char c = f.read();
-        if (c == '\n' && line.length() > 0)
+        File f = SPIFFS.open(LAST_ENTRY_PATH, FILE_READ);
+        if (f)
         {
-            // line currently reversed
-            line.trim();
-            line = String(line.c_str());
-            // reverse line
-            int L = line.length();
-            String rev = "";
-            for (int i = L - 1; i >= 0; --i)
-                rev += line[i];
-            if (rev.length() > 2 && rev.charAt(0) == 'E' && rev.charAt(1) == ',')
-            {
-                uint32_t epoch = (uint32_t)rev.substring(2).toInt();
-                f.close();
-                return epoch;
-            }
-            line = "";
-        }
-        else if (c != '\r')
-        {
-            line += c; // building reversed
-        }
-        pos--;
-    }
-    // check remaining
-    if (line.length() > 0)
-    {
-        int L = line.length();
-        String rev = "";
-        for (int i = L - 1; i >= 0; --i)
-            rev += line[i];
-        if (rev.length() > 2 && rev.charAt(0) == 'E' && rev.charAt(1) == ',')
-        {
-            uint32_t epoch = (uint32_t)rev.substring(2).toInt();
+            String s = f.readStringUntil('\n');
             f.close();
-            return epoch;
+            s.trim();
+            if (s.length() == 0)
+                return 0;
+            return (uint32_t)strtoul(s.c_str(), NULL, 10);
         }
+    }
+    // Fallback: no quick lookup file present — return 0 to avoid long blocking scan
+    return 0;
+}
+
+// Print a simple dashed border
+static void _print_border()
+{
+    for (int i = 0; i < 56; ++i)
+        Serial.print('-');
+    Serial.println();
+}
+
+void storage_print_file(const char *path)
+{
+    _print_border();
+    Serial.print("| File: ");
+    Serial.println(path);
+    _print_border();
+
+    if (!SPIFFS.exists(path))
+    {
+        Serial.println("| <missing>");
+        _print_border();
+        return;
+    }
+
+    File f = SPIFFS.open(path, FILE_READ);
+    if (!f)
+    {
+        Serial.println("| <open failed>");
+        _print_border();
+        return;
+    }
+
+    while (f.available())
+    {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        Serial.print("| ");
+        Serial.println(line);
     }
     f.close();
-    return 0;
+    _print_border();
+}
+
+void storage_dump_state()
+{
+    storage_print_file(LOG_PATH);
+    storage_print_file(LAST_ENTRY_PATH);
 }
