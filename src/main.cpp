@@ -218,10 +218,10 @@ void showSpeedGauge(double speed, int cx, int cy, int radius, const RadarAlertRe
     else if (rr.severity == 1)
       color = ST77XX_YELLOW;
     else if (rr.severity == 2)
-      color = ST77XX_MAGENTA;
+      color = ST77XX_ORANGE;
     else
     {
-      color = ST77XX_MAGENTA;
+      color = ST77XX_ORANGE;
       blink = true;
     }
   }
@@ -250,7 +250,7 @@ void showSpeedGauge(double speed, int cx, int cy, int radius, const RadarAlertRe
 
     // color rules: >=800 green, <800 orange (yellow), <=200 magenta
     if (d <= 200.0)
-      distColor = ST77XX_MAGENTA;
+      distColor = ST77XX_ORANGE;
     else if (d < 800.0)
       distColor = ST77XX_YELLOW;
     else
@@ -458,7 +458,7 @@ static void gps_display_task(void *pvParameters)
       {
         char status[64];
         snprintf(status, sizeof(status), "Fix: %s  Sats: %d", msg.valid ? "YES" : "NO", msg.sats);
-        showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 1);
+        showMessage(status, 92, msg.valid ? ST77XX_GREEN : ST77XX_YELLOW, 2);
         lfix = false;
         /*
                 showMessage("GPS: no fix", 20, ST77XX_RED, 1);
@@ -476,7 +476,7 @@ static void gps_display_task(void *pvParameters)
         if (!lfix)
         {
           snprintf(linebuf, sizeof(linebuf), "                  ", msg.sats);
-          showMessage(linebuf, 92, ST77XX_YELLOW, 1);
+          showMessage(linebuf, 92, ST77XX_YELLOW, 2);
           lfix = true;
         }
       }
@@ -538,7 +538,7 @@ void setup()
   // Serial.println("Init display 240x135 and draw 2px border...");
   // Use the confirmed physical resolution
   tft.init(135, 240);
-  tft.setRotation(1);
+  tft.setRotation(3);
   tft.fillScreen(ST77XX_BLACK);
 
   // Get width/height from library (safe way to match current init/rotation)
@@ -672,10 +672,10 @@ void setup()
   }
   Serial.println("Storage initialized.");
   static const double myZonePts[4][2] = {
-      {28.04882958455011, -16.578792877407757},
-      {28.047733153660843, -16.57824154225997},
-      {28.048874998606195, -16.57490412683203},
-      {28.049913028944573, -16.575639240362413}};
+      {28.072660726787962, -16.687848455018287},
+      {28.072513755492572, -16.68724704269272},
+      {28.073121148836535, -16.687081949113157},
+      {28.07318357879289, -16.687730531032884}};
   Serial.println("Initialize zone points...");
   zone_init(myZonePts);
   Serial.println("Zone initialized.");
