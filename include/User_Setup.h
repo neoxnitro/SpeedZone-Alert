@@ -1,5 +1,5 @@
-// Project-level TFT_eSPI user setup: select the TTGO T-Display setup
+// User setup placeholder - no display configured for esp32-C3-mini
 #ifndef USER_SETUP_LOADED
 #define USER_SETUP_LOADED
-#include <User_Setups/Setup25_TTGO_T_Display.h>
+// No TFT/eSPI setup included for headless build
 #endif

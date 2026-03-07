@@ -1,0 +1,10 @@
+# Enable USB CDC console on boot (ESP-IDF Kconfig defaults)
+CONFIG_ESP_CONSOLE_USB_CDC=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=n
+CONFIG_ESP_CONSOLE_UART=n
+
+# Force CPU frequency to maximum supported for ESP32-C3 (160 MHz)
+# Provide both possible Kconfig names to be safe across IDF versions
+CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ=160
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160
+
